@@ -121,6 +121,17 @@ jobs:
           brew list bison >/dev/null 2>&1 || brew install bison
           export PATH="/opt/homebrew/opt/bison/bin:$PATH"
           bison --version | head -1
+
+          MINGW_DIR="$GITHUB_WORKSPACE/toolchains/llvm-mingw-20260421-ucrt-macos-universal"
+          if [ ! -x "$MINGW_DIR/bin/aarch64-w64-mingw32-clang" ]; then
+            mkdir -p "$GITHUB_WORKSPACE/toolchains"
+            curl -fL --retry 3 \
+              https://github.com/mstorsjo/llvm-mingw/releases/download/20260421/llvm-mingw-20260421-ucrt-macos-universal.tar.xz \
+              | tar -xJ -C "$GITHUB_WORKSPACE/toolchains"
+          fi
+          export PATH="$MINGW_DIR/bin:$PATH"
+          aarch64-w64-mingw32-clang --version | head -1
+
           rm -rf wine/build-macos
           mkdir -p wine/build-macos
           cd wine/build-macos
