@@ -115,6 +115,25 @@ jobs:
           ! grep -RInE 'IPHONEOS_DEPLOYMENT_TARGET = (17|18)\.|miphoneos-version-min=(17|18)\.|CMAKE_OSX_DEPLOYMENT_TARGET=(17|18)\.|"minOSVersion": "(17|18)\.' \
             app build
 
+      - name: Configure Wine build metadata
+        run: |
+          set -euxo pipefail
+          export PATH="/opt/homebrew/opt/bison/bin:$PATH"
+          command -v bison >/dev/null || brew install bison
+          rm -rf wine/build-macos
+          mkdir -p wine/build-macos
+          cd wine/build-macos
+          ../configure \
+            --enable-win64 \
+            --without-x \
+            --without-freetype \
+            --without-fontconfig \
+            --without-gnutls \
+            --without-pulse \
+            --without-alsa
+          test -f include/config.h
+          echo "Wine configure generated $(find include -type f | wc -l | tr -d ' ') include files"
+
       - name: Patch FEX native-iOS diagnostics
         run: |
           python3 - <<'PY'
@@ -196,6 +215,19 @@ jobs:
           do
             test -f "$f" || { echo "MISSING: $f"; exit 1; }
           done
+
+      - name: Build wineserver for iOS 16.5
+        run: |
+          set -euxo pipefail
+          if ! command -v llvm-objcopy >/dev/null 2>&1; then
+            brew install llvm
+            export PATH="/opt/homebrew/opt/llvm/bin:$PATH"
+          fi
+          rm -rf build/wineserver/obj
+          bash build/wineserver/build.sh
+          test -f app/Madeira/libwineserver.a
+          xcrun vtool -show-build app/Madeira/libwineserver.a || true
+          ls -lh app/Madeira/libwineserver.a
 
       - name: Inventory remaining native app libraries
         run: |
