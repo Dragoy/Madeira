@@ -43,6 +43,39 @@ jobs:
           ! grep -RInE 'IPHONEOS_DEPLOYMENT_TARGET = (17|18)\.|miphoneos-version-min=(17|18)\.|CMAKE_OSX_DEPLOYMENT_TARGET=(17|18)\.|"minOSVersion": "(17|18)\.' \
             app build
 
+      - name: Fetch official Microsoft VC++ x64 runtime
+        run: |
+          set -euxo pipefail
+          brew list sevenzip >/dev/null 2>&1 || brew install sevenzip
+          curl -fL --retry 3 https://aka.ms/vs/17/release/vc_redist.x64.exe -o "$RUNNER_TEMP/VC_redist.x64.exe"
+          rm -rf "$RUNNER_TEMP/vcredist" "$RUNNER_TEMP/vcredist-expanded" app/Madeira/x86_64-vcruntime
+          mkdir -p "$RUNNER_TEMP/vcredist" "$RUNNER_TEMP/vcredist-expanded" app/Madeira/x86_64-vcruntime
+          7zz x "$RUNNER_TEMP/VC_redist.x64.exe" -o"$RUNNER_TEMP/vcredist" -y >/dev/null
+          while IFS= read -r archive; do
+            7zz x "$archive" -o"$RUNNER_TEMP/vcredist-expanded" -y >/dev/null || true
+          done < <(find "$RUNNER_TEMP/vcredist" -type f \( -iname '*.cab' -o -iname '*.msi' \))
+          required=(
+            concrt140.dll
+            msvcp140.dll
+            msvcp140_1.dll
+            msvcp140_2.dll
+            msvcp140_atomic_wait.dll
+            msvcp140_codecvt_ids.dll
+            vcamp140.dll
+            vccorlib140.dll
+            vcomp140.dll
+            vcruntime140.dll
+            vcruntime140_1.dll
+            vcruntime140_threads.dll
+          )
+          for dll in "${required[@]}"; do
+            src="$(find "$RUNNER_TEMP/vcredist-expanded" "$RUNNER_TEMP/vcredist" -type f -iname "$dll" -print -quit)"
+            test -n "$src" || { echo "Missing Microsoft runtime DLL: $dll"; exit 1; }
+            cp "$src" "app/Madeira/x86_64-vcruntime/$dll"
+          done
+          ls -lh app/Madeira/x86_64-vcruntime
+          test "$(find app/Madeira/x86_64-vcruntime -type f -name '*.dll' | wc -l | tr -d ' ')" -eq 12
+
       - name: Patch FEX native-iOS diagnostics
         run: |
           python3 - <<'PY'
