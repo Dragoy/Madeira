@@ -43,6 +43,43 @@ jobs:
           ! grep -RInE 'IPHONEOS_DEPLOYMENT_TARGET = (17|18)\.|miphoneos-version-min=(17|18)\.|CMAKE_OSX_DEPLOYMENT_TARGET=(17|18)\.|"minOSVersion": "(17|18)\.' \
             app build
 
+      - name: Patch FEX native-iOS diagnostics
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("FEX/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp")
+          s = p.read_text()
+          old = '''  MEMORY_BASIC_INFORMATION mbi {};
+            const char* type = "?";
+            if (VirtualQuery(reinterpret_cast<LPCVOID>(GPRs[AddressReg]), &mbi, sizeof(mbi))) {
+              type = mbi.Type == MEM_IMAGE ? "MEM_IMAGE" : mbi.Type == MEM_MAPPED ? "MEM_MAPPED" : "MEM_PRIVATE";
+            }
+            LogMan::Msg::EFmt("[caspal128] MISALIGNED-UNSUPPORTED Size={} addrReg=x{} addr={:#x} misalign={} "
+                              "crosses16B={} | region base={} size={:#x} prot={:#x} type={} state={:#x}",
+                              Size, AddressReg, GPRs[AddressReg], GPRs[AddressReg] & 15,
+                              (GPRs[AddressReg] & 15) ? "yes" : "no", mbi.BaseAddress, mbi.RegionSize,
+                              mbi.Protect, type, mbi.State);'''
+          new = '''#if defined(_WIN32)
+            MEMORY_BASIC_INFORMATION mbi {};
+            const char* type = "?";
+            if (VirtualQuery(reinterpret_cast<LPCVOID>(GPRs[AddressReg]), &mbi, sizeof(mbi))) {
+              type = mbi.Type == MEM_IMAGE ? "MEM_IMAGE" : mbi.Type == MEM_MAPPED ? "MEM_MAPPED" : "MEM_PRIVATE";
+            }
+            LogMan::Msg::EFmt("[caspal128] MISALIGNED-UNSUPPORTED Size={} addrReg=x{} addr={:#x} misalign={} "
+                              "crosses16B={} | region base={} size={:#x} prot={:#x} type={} state={:#x}",
+                              Size, AddressReg, GPRs[AddressReg], GPRs[AddressReg] & 15,
+                              (GPRs[AddressReg] & 15) ? "yes" : "no", mbi.BaseAddress, mbi.RegionSize,
+                              mbi.Protect, type, mbi.State);
+          #else
+            LogMan::Msg::EFmt("[caspal128] MISALIGNED-UNSUPPORTED Size={} addrReg=x{} addr={:#x} misalign={} crosses16B={}",
+                              Size, AddressReg, GPRs[AddressReg], GPRs[AddressReg] & 15,
+                              (GPRs[AddressReg] & 15) ? "yes" : "no");
+          #endif'''
+          if old not in s:
+              raise SystemExit("expected Arm64.cpp diagnostic block not found")
+          p.write_text(s.replace(old, new, 1))
+          PY
+
       - name: Configure FEX for iOS 16.5
         run: |
           set -euxo pipefail
