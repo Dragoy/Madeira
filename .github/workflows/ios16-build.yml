@@ -1,0 +1,149 @@
+name: Madeira iOS 16.5 build
+
+on:
+  push:
+    branches:
+      - ios16-build
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout with nested submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Select Xcode 26.6
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          sw_vers
+
+      - name: Install build tools
+        run: |
+          brew install cmake ninja pkg-config meson autoconf automake libtool llvm xz || true
+          cmake --version
+          ninja --version
+
+      - name: Verify iOS 16.5 source targets
+        run: |
+          set -euxo pipefail
+          ! grep -RInE 'IPHONEOS_DEPLOYMENT_TARGET = (17|18)\.|miphoneos-version-min=(17|18)\.|CMAKE_OSX_DEPLOYMENT_TARGET=(17|18)\.|"minOSVersion": "(17|18)\.' \
+            --exclude-dir=.git .
+
+      - name: Configure FEX for iOS 16.5
+        run: |
+          set -euxo pipefail
+          rm -rf FEX/build-ios
+          cmake -S FEX -B FEX/build-ios -G Ninja \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=16.5 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=OFF \
+            -DENABLE_LTO=OFF \
+            -DENABLE_OFFLINE_TELEMETRY=OFF \
+            -DENABLE_ASAN=OFF \
+            -DENABLE_TSAN=OFF \
+            -DENABLE_UBSAN=OFF
+
+      - name: Build FEX libraries
+        run: |
+          set -euxo pipefail
+          cmake --build FEX/build-ios --parallel 3
+          find FEX/build-ios -name '*.a' -maxdepth 6 -print | sort
+
+      - name: Verify FEX libraries used by Xcode
+        run: |
+          set -euxo pipefail
+          for f in \
+            FEX/build-ios/FEXCore/Source/libFEXCore.a \
+            FEX/build-ios/FEXCore/Source/libFEXCore_Base.a \
+            FEX/build-ios/FEXCore/Source/libJemallocLibs.a \
+            FEX/build-ios/External/fmt/libfmt.a \
+            FEX/build-ios/External/cephes/libcephes_128bit.a \
+            FEX/build-ios/External/xxhash/cmake_unofficial/libxxhash.a \
+            FEX/build-ios/External/SoftFloat-3e/libsoftfloat_3e.a
+          do
+            test -f "$f" || { echo "MISSING: $f"; exit 1; }
+          done
+
+      - name: Inventory remaining native app libraries
+        run: |
+          set -euxo pipefail
+          for f in \
+            app/Madeira/libwineserver.a \
+            app/Madeira/libntdll_unix.a \
+            app/Madeira/libwin32u_unix.a \
+            app/Madeira/libdxmt_combined.a \
+            app/Madeira/libgnutls.a \
+            app/Madeira/libhogweed.a \
+            app/Madeira/libnettle.a \
+            app/Madeira/libgmp.a
+          do
+            if [ -f "$f" ]; then
+              echo "FOUND $f ($(stat -f%z "$f") bytes)"
+            else
+              echo "MISSING $f"
+            fi
+          done
+
+      - name: Attempt unsigned Madeira app build
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project app/Madeira.xcodeproj \
+            -scheme Madeira \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$PWD/DerivedData" \
+            IPHONEOS_DEPLOYMENT_TARGET=16.5 \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=YES \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build | tee xcodebuild.log
+
+      - name: Package TrollStore IPA
+        if: success()
+        run: |
+          set -euxo pipefail
+          APP="$PWD/DerivedData/Build/Products/Release-iphoneos/Madeira.app"
+          test -d "$APP"
+          /usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$APP/Info.plist" || true
+          xcrun vtool -show-build "$APP/Madeira" || otool -l "$APP/Madeira"
+          codesign --force --deep --sign - \
+            --entitlements app/Madeira/Madeira.entitlements "$APP"
+          rm -rf Payload Madeira-iOS16.5-TrollStore.ipa
+          mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qry Madeira-iOS16.5-TrollStore.ipa Payload
+
+      - name: Upload IPA
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Madeira-iOS16.5-TrollStore
+          path: Madeira-iOS16.5-TrollStore.ipa
+          if-no-files-found: error
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: madeira-ios16-build-logs
+          path: |
+            xcodebuild.log
+            FEX/build-ios/CMakeCache.txt
+          if-no-files-found: ignore
