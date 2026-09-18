@@ -118,8 +118,9 @@ jobs:
       - name: Configure Wine build metadata
         run: |
           set -euxo pipefail
+          brew list bison >/dev/null 2>&1 || brew install bison
           export PATH="/opt/homebrew/opt/bison/bin:$PATH"
-          command -v bison >/dev/null || brew install bison
+          bison --version | head -1
           rm -rf wine/build-macos
           mkdir -p wine/build-macos
           cd wine/build-macos
