@@ -51,9 +51,17 @@ jobs:
           rm -rf "$RUNNER_TEMP/vcredist" "$RUNNER_TEMP/vcredist-expanded" app/Madeira/x86_64-vcruntime
           mkdir -p "$RUNNER_TEMP/vcredist" "$RUNNER_TEMP/vcredist-expanded" app/Madeira/x86_64-vcruntime
           7zz x "$RUNNER_TEMP/VC_redist.x64.exe" -o"$RUNNER_TEMP/vcredist" -y >/dev/null
+          echo "Top-level files extracted from VC_redist:"
+          find "$RUNNER_TEMP/vcredist" -type f -print | sort
+          # Current VC_redist bundles may expose embedded CAB/MSI payloads
+          # without useful extensions. Probe every extracted file with 7-Zip.
           while IFS= read -r archive; do
-            7zz x "$archive" -o"$RUNNER_TEMP/vcredist-expanded" -y >/dev/null || true
-          done < <(find "$RUNNER_TEMP/vcredist" -type f \( -iname '*.cab' -o -iname '*.msi' \))
+            out="$RUNNER_TEMP/vcredist-expanded/$(printf '%s' "$archive" | shasum -a 256 | cut -d' ' -f1)"
+            mkdir -p "$out"
+            7zz x "$archive" -o"$out" -y >/dev/null 2>&1 || true
+          done < <(find "$RUNNER_TEMP/vcredist" -type f -print)
+          echo "Candidate DLLs after recursive extraction:"
+          find "$RUNNER_TEMP/vcredist-expanded" "$RUNNER_TEMP/vcredist" -type f -iname '*.dll' -print | sort
           required=(
             concrt140.dll
             msvcp140.dll
