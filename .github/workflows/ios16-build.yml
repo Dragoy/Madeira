@@ -146,6 +146,32 @@ jobs:
           test -f include/config.h
           echo "Wine configure generated $(find include -type f | wc -l | tr -d ' ') include files"
 
+      - name: Generate Wine IDL headers
+        run: |
+          set -euxo pipefail
+          export PATH="$GITHUB_WORKSPACE/toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin:/opt/homebrew/opt/bison/bin:$PATH"
+          make -C wine/build-macos -j3 include/dwrite.h include/dwrite_3.h
+          test -f wine/build-macos/include/dwrite.h
+          test -f wine/build-macos/include/dwrite_3.h
+
+      - name: Build GnuTLS stack for iOS 16.5
+        run: |
+          set -euxo pipefail
+          rm -rf build/gnutls-ios/obj toolchains/gnutls-ios
+          bash build/gnutls-ios/build.sh
+          cp toolchains/gnutls-ios/lib/libgnutls.a app/Madeira/libgnutls.a
+          cp toolchains/gnutls-ios/lib/libhogweed.a app/Madeira/libhogweed.a
+          cp toolchains/gnutls-ios/lib/libnettle.a app/Madeira/libnettle.a
+          cp toolchains/gnutls-ios/lib/libgmp.a app/Madeira/libgmp.a
+
+      - name: Prepare and build FreeType for iOS 16.5
+        run: |
+          set -euxo pipefail
+          rm -rf research/freetype build/freetype-ios/build
+          git clone --depth 1 --branch VER-2-13-3 https://github.com/freetype/freetype.git research/freetype
+          bash build/freetype-ios/build.sh
+          test -f build/freetype-ios/build/libfreetype.a
+
       - name: Patch FEX native-iOS diagnostics
         run: |
           python3 - <<'PY'
@@ -240,6 +266,14 @@ jobs:
           test -f app/Madeira/libwineserver.a
           xcrun vtool -show-build app/Madeira/libwineserver.a || true
           ls -lh app/Madeira/libwineserver.a
+
+      - name: Build ntdll unix side for iOS 16.5
+        run: |
+          set -euxo pipefail
+          rm -rf build/ntdll-unix/obj
+          bash build/ntdll-unix/build.sh
+          test -f app/Madeira/libntdll_unix.a
+          ls -lh app/Madeira/libntdll_unix.a
 
       - name: Inventory remaining native app libraries
         run: |
