@@ -55,6 +55,7 @@ jobs:
             -DCMAKE_OSX_DEPLOYMENT_TARGET=16.5 \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_TESTING=OFF \
+            -DTUNE_CPU=none \
             -DENABLE_LTO=OFF \
             -DENABLE_OFFLINE_TELEMETRY=OFF \
             -DENABLE_ASAN=OFF \
