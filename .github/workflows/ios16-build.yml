@@ -105,7 +105,9 @@ jobs:
       - name: Build FEX libraries
         run: |
           set -euxo pipefail
-          cmake --build FEX/build-ios --parallel 3
+          # Madeira links the static FEX libraries. Avoid the unrelated
+          # FEXCore_shared target, whose Linux/GNU ld flags are invalid for Apple ld.
+          cmake --build FEX/build-ios --target FEXCore FEXCore_Base JemallocLibs --parallel 3
           find FEX/build-ios -name '*.a' -maxdepth 6 -print | sort
 
       - name: Verify FEX libraries used by Xcode
