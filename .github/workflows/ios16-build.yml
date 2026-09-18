@@ -41,7 +41,7 @@ jobs:
         run: |
           set -euxo pipefail
           ! grep -RInE 'IPHONEOS_DEPLOYMENT_TARGET = (17|18)\.|miphoneos-version-min=(17|18)\.|CMAKE_OSX_DEPLOYMENT_TARGET=(17|18)\.|"minOSVersion": "(17|18)\.' \
-            --exclude-dir=.git .
+            app build
 
       - name: Configure FEX for iOS 16.5
         run: |
