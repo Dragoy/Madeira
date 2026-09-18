@@ -10,7 +10,67 @@ permissions:
   contents: read
 
 jobs:
+  prepare-vcruntime:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Download and install official Microsoft VC++ x64 runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = Join-Path $env:RUNNER_TEMP "vc_redist.x64.exe"
+          Invoke-WebRequest "https://aka.ms/vc14/vc_redist.x64.exe" -OutFile $exe
+          $p = Start-Process -FilePath $exe -ArgumentList "/install","/quiet","/norestart" -Wait -PassThru
+          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 1638 -and $p.ExitCode -ne 3010) {
+            throw "VC_redist failed with exit code $($p.ExitCode)"
+          }
+
+          $dest = Join-Path $env:RUNNER_TEMP "x86_64-vcruntime"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          $required = @(
+            "concrt140.dll",
+            "msvcp140.dll",
+            "msvcp140_1.dll",
+            "msvcp140_2.dll",
+            "msvcp140_atomic_wait.dll",
+            "msvcp140_codecvt_ids.dll",
+            "vcamp140.dll",
+            "vccorlib140.dll",
+            "vcomp140.dll",
+            "vcruntime140.dll",
+            "vcruntime140_1.dll",
+            "vcruntime140_threads.dll"
+          )
+
+          $vsRoot = Join-Path $env:ProgramFiles "Microsoft Visual Studio"
+          foreach ($dll in $required) {
+            $src = Join-Path $env:WINDIR "System32\$dll"
+            if (-not (Test-Path $src)) {
+              $candidate = Get-ChildItem -Path $vsRoot -Recurse -File -Filter $dll -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -match '\\x64\\' } |
+                Select-Object -First 1
+              if ($null -eq $candidate) {
+                throw "Required runtime DLL not found after official install: $dll"
+              }
+              $src = $candidate.FullName
+            }
+            Copy-Item $src (Join-Path $dest $dll)
+          }
+
+          Get-ChildItem $dest | Format-Table Name,Length
+          if ((Get-ChildItem $dest -Filter *.dll).Count -ne 12) {
+            throw "Expected exactly 12 runtime DLLs"
+          }
+
+      - name: Upload VC++ runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: madeira-vcruntime-x64
+          path: ${{ runner.temp }}/x86_64-vcruntime
+          if-no-files-found: error
+
   build:
+    needs: prepare-vcruntime
     runs-on: macos-26
     timeout-minutes: 360
 
@@ -20,6 +80,18 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 1
+
+      - name: Download Microsoft VC++ runtime artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: madeira-vcruntime-x64
+          path: app/Madeira/x86_64-vcruntime
+
+      - name: Verify Microsoft VC++ runtime artifact
+        run: |
+          set -euxo pipefail
+          ls -lh app/Madeira/x86_64-vcruntime
+          test "$(find app/Madeira/x86_64-vcruntime -type f -name '*.dll' | wc -l | tr -d ' ')" -eq 12
 
       - name: Select Xcode 26.6
         run: |
@@ -42,47 +114,6 @@ jobs:
           set -euxo pipefail
           ! grep -RInE 'IPHONEOS_DEPLOYMENT_TARGET = (17|18)\.|miphoneos-version-min=(17|18)\.|CMAKE_OSX_DEPLOYMENT_TARGET=(17|18)\.|"minOSVersion": "(17|18)\.' \
             app build
-
-      - name: Fetch official Microsoft VC++ x64 runtime
-        run: |
-          set -euxo pipefail
-          brew list sevenzip >/dev/null 2>&1 || brew install sevenzip
-          curl -fL --retry 3 https://aka.ms/vs/17/release/vc_redist.x64.exe -o "$RUNNER_TEMP/VC_redist.x64.exe"
-          rm -rf "$RUNNER_TEMP/vcredist" "$RUNNER_TEMP/vcredist-expanded" app/Madeira/x86_64-vcruntime
-          mkdir -p "$RUNNER_TEMP/vcredist" "$RUNNER_TEMP/vcredist-expanded" app/Madeira/x86_64-vcruntime
-          7zz x "$RUNNER_TEMP/VC_redist.x64.exe" -o"$RUNNER_TEMP/vcredist" -y >/dev/null
-          echo "Top-level files extracted from VC_redist:"
-          find "$RUNNER_TEMP/vcredist" -type f -print | sort
-          # Current VC_redist bundles may expose embedded CAB/MSI payloads
-          # without useful extensions. Probe every extracted file with 7-Zip.
-          while IFS= read -r archive; do
-            out="$RUNNER_TEMP/vcredist-expanded/$(printf '%s' "$archive" | shasum -a 256 | cut -d' ' -f1)"
-            mkdir -p "$out"
-            7zz x "$archive" -o"$out" -y >/dev/null 2>&1 || true
-          done < <(find "$RUNNER_TEMP/vcredist" -type f -print)
-          echo "Candidate DLLs after recursive extraction:"
-          find "$RUNNER_TEMP/vcredist-expanded" "$RUNNER_TEMP/vcredist" -type f -iname '*.dll' -print | sort
-          required=(
-            concrt140.dll
-            msvcp140.dll
-            msvcp140_1.dll
-            msvcp140_2.dll
-            msvcp140_atomic_wait.dll
-            msvcp140_codecvt_ids.dll
-            vcamp140.dll
-            vccorlib140.dll
-            vcomp140.dll
-            vcruntime140.dll
-            vcruntime140_1.dll
-            vcruntime140_threads.dll
-          )
-          for dll in "${required[@]}"; do
-            src="$(find "$RUNNER_TEMP/vcredist-expanded" "$RUNNER_TEMP/vcredist" -type f -iname "$dll" -print -quit)"
-            test -n "$src" || { echo "Missing Microsoft runtime DLL: $dll"; exit 1; }
-            cp "$src" "app/Madeira/x86_64-vcruntime/$dll"
-          done
-          ls -lh app/Madeira/x86_64-vcruntime
-          test "$(find app/Madeira/x86_64-vcruntime -type f -name '*.dll' | wc -l | tr -d ' ')" -eq 12
 
       - name: Patch FEX native-iOS diagnostics
         run: |
