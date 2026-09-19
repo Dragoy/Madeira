@@ -150,7 +150,7 @@ jobs:
           path: |
             toolchains/llvm-mingw-20260421-ucrt-macos-universal
             wine/build-macos
-          key: madeira-wine-ios16.5-xcode26.6-v1-${{ steps.deps.outputs.wine }}
+          key: madeira-wine-ios16.5-xcode26.6-v2-${{ steps.deps.outputs.wine }}
 
       - name: Configure Wine build metadata
         if: steps.cache-wine.outputs.cache-hit != 'true'
@@ -190,38 +190,7 @@ jobs:
           brew list bison >/dev/null 2>&1 || brew install bison
           export PATH="$GITHUB_WORKSPACE/toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin:/opt/homebrew/opt/bison/bin:$PATH"
           bison --version | head -1
-          make -C wine/build-macos -j3 \
-            include/wtypesbase.h \
-            include/wtypes.h \
-            include/unknwn.h \
-            include/objidlbase.h \
-            include/objidl.h \
-            include/oaidl.h \
-            include/propidl.h \
-            include/oleidl.h \
-            include/ocidl.h \
-            include/servprov.h \
-            include/msxml.h \
-            include/urlmon.h \
-            include/dxgiformat.h \
-            include/dxgicommon.h \
-            include/dxgitype.h \
-            include/dxgi.h \
-            include/d3dcommon.h \
-            include/d3d10.h \
-            include/d3d10sdklayers.h \
-            include/d3d10shader.h \
-            include/d3d10effect.h \
-            include/d3d10_1.h \
-            include/dcommon.h \
-            include/d2d1.h \
-            include/dwrite.h \
-            include/dwrite_1.h \
-            include/dwrite_2.h \
-            include/dwrite_3.h
-          for h in wtypesbase.h wtypes.h unknwn.h objidlbase.h objidl.h oaidl.h propidl.h oleidl.h ocidl.h servprov.h msxml.h urlmon.h dxgiformat.h dxgicommon.h dxgitype.h dxgi.h d3dcommon.h d3d10.h d3d10sdklayers.h d3d10shader.h d3d10effect.h d3d10_1.h dcommon.h d2d1.h dwrite.h dwrite_1.h dwrite_2.h dwrite_3.h; do
-            test -f "wine/build-macos/include/$h"
-          done
+          python3 tools/ci/wine_headers.py
 
       - name: Save Wine metadata cache
         if: steps.cache-wine.outputs.cache-hit != 'true'
@@ -230,7 +199,7 @@ jobs:
           path: |
             toolchains/llvm-mingw-20260421-ucrt-macos-universal
             wine/build-macos
-          key: madeira-wine-ios16.5-xcode26.6-v1-${{ steps.deps.outputs.wine }}
+          key: madeira-wine-ios16.5-xcode26.6-v2-${{ steps.deps.outputs.wine }}
 
       - name: Restore GnuTLS iOS cache
         id: cache-gnutls
