@@ -282,6 +282,14 @@ jobs:
           test -f app/Madeira/libntdll_unix.a
           ls -lh app/Madeira/libntdll_unix.a
 
+      - name: Build win32u unix side for iOS 16.5
+        run: |
+          set -euxo pipefail
+          rm -rf build/win32u-unix/obj
+          bash build/win32u-unix/build.sh
+          test -f app/Madeira/libwin32u_unix.a
+          ls -lh app/Madeira/libwin32u_unix.a
+
       - name: Inventory remaining native app libraries
         run: |
           set -euxo pipefail
