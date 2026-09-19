@@ -7637,6 +7637,31 @@ static inline int mprotect_exec( void *base, size_t size, int unix_prot )
             jit_pool_init_done = 1;
         }
 
+        /* iOS16/TrollStore diagnostic: runWineFullSequence() can be invoked more
+         * than once in one Madeira process. Swift may publish a freshly allocated
+         * WINE_IOS_JIT_* pool while this Wine unixlib keeps these function-static
+         * bases from the first session. Do not change behaviour here yet; simply
+         * name that split-brain state so a cold-vs-warm A/B can prove or kill the
+         * hypothesis. */
+        {
+            const char *cur_rx_s = getenv("WINE_IOS_JIT_RX");
+            const char *cur_rw_s = getenv("WINE_IOS_JIT_RW");
+            uintptr_t env_rx = cur_rx_s ? (uintptr_t)strtoull(cur_rx_s, NULL, 16) : 0;
+            uintptr_t env_rw = cur_rw_s ? (uintptr_t)strtoull(cur_rw_s, NULL, 16) : 0;
+            static int gen_mismatch_logged;
+            if (!gen_mismatch_logged &&
+                ((env_rx && env_rx != (uintptr_t)jit_rx_base) ||
+                 (env_rw && env_rw != (uintptr_t)jit_rw_base)))
+            {
+                gen_mismatch_logged = 1;
+                dprintf(STDERR_FILENO,
+                    "[pool-generation-mismatch] env RX=%p RW=%p but ntdll cached RX=%p RW=%p "
+                    "— multiple Wine runs in one Madeira process are using different JIT pools "
+                    "rev=ios16dx11diag1\n",
+                    (void *)env_rx, (void *)env_rw, jit_rx_base, jit_rw_base);
+            }
+        }
+
         /* iOS-Madeira ml640: AN OWNED ANON-JIT RANGE IS SETTLED — DECIDE IT FIRST.
          *
          * ROOT CAUSE, proven by the ml639 three-view hash:
