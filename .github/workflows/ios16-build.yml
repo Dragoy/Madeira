@@ -395,6 +395,17 @@ jobs:
             -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath "$PWD/DerivedData" \
             IPHONEOS_DEPLOYMENT_TARGET=16.5 ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build 2>&1 | tee xcodebuild.log
+      - name: Verify pre-iOS17 libc++ ABI imports
+        run: |
+          set -euo pipefail
+          APP="$PWD/DerivedData/Build/Products/Release-iphoneos/Madeira.app"
+          mkdir -p ci-logs
+          xcrun nm -u "$APP/Madeira" | tee ci-logs/undefined-symbols.txt
+          if grep -E '_ZNSt3__13pmr15memory_resourceD[012]Ev|_ZTINSt3__13pmr15memory_resourceE|_ZTVNSt3__13pmr15memory_resourceE' ci-logs/undefined-symbols.txt; then
+            echo "ERROR: Madeira still imports libc++ PMR ABI introduced in iOS 17"
+            exit 1
+          fi
+
       - name: Package TrollStore IPA
         run: |
           set -euo pipefail
