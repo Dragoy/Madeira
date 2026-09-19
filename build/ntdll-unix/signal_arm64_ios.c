@@ -8498,12 +8498,12 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
                                 if (slot_addr >= 0x100000000ULL)
                                 {
                                     void *slot_val = *(void**)slot_addr;
-                                    extern uintptr_t ios_jit_reverse_translate_addr(void *addr);
-                                    uintptr_t parent_slot = ios_jit_reverse_translate_addr((void*)slot_addr);
-                                    void *parent_val = (parent_slot && parent_slot != slot_addr)
+                                    extern void *ios_jit_reverse_translate_addr(const void *addr);
+                                    void *parent_slot = ios_jit_reverse_translate_addr((void*)slot_addr);
+                                    void *parent_val = (parent_slot && parent_slot != (void*)slot_addr)
                                         ? *(void**)parent_slot : NULL;
                                     ERR("    JIT *slot = %p   parent@%p *slot = %p (expected %p)\n",
-                                        slot_val, (void*)parent_slot, parent_val,
+                                        slot_val, parent_slot, parent_val,
                                         peb ? peb->WerRegistrationData : NULL);
                                 }
                                 break;
