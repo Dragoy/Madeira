@@ -19,6 +19,10 @@ APP_LIB="$REPO_ROOT/app/Madeira/libwin32u_unix.a"
 
 mkdir -p "$OBJ_DIR"
 
+# Direct C compilation bypasses Wine's generated-header dependency rules.
+# Generate the declared set, including transitive COM/D3D headers, once.
+python3 "$REPO_ROOT/tools/ci/wine_headers.py" --root "$REPO_ROOT"
+
 SUCCEEDED=0
 FAILED=0
 FAILED_FILES=""
