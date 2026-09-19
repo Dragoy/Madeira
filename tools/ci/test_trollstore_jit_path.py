@@ -18,6 +18,9 @@ checks = {
         "bool jit_is_traced(void);" in header,
     "C JIT API exposes persistent direct pool":
         "bool jit_direct_pool_create" in header,
+    "SIGTRAP fallback is installed when TrollStore detached":
+        "void jit_install_trap_handler(void)" in (root / "app/Madeira/JITAllocator.c").read_text()
+        and "if (jit_is_traced())" in (root / "app/Madeira/JITAllocator.c").read_text(),
     "JIT badge follows sticky CS_DEBUGGED rather than P_TRACED":
         'entitlementBadge("JIT", granted: jitEnabled)' in content,
 }
