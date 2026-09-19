@@ -270,6 +270,8 @@ jobs:
             test -s "$f" || { echo "MISSING: $f"; exit 1; }
           done
 
+      - name: Verify iOS wineserver wake discipline
+        run: python3 tools/ci/test_ios_wineserver_wake.py
       - name: Restore wineserver iOS cache
         id: cache-wineserver
         uses: actions/cache/restore@v4
