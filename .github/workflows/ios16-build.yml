@@ -151,6 +151,8 @@ jobs:
             toolchains/llvm-mingw-20260421-ucrt-macos-universal
             wine/build-macos
           key: madeira-wine-ios16.5-xcode26.6-v2-${{ steps.deps.outputs.wine }}
+          restore-keys: |
+            madeira-wine-ios16.5-xcode26.6-v1-${{ steps.deps.outputs.wine }}
 
       - name: Configure Wine build metadata
         if: steps.cache-wine.outputs.cache-matched-key == ''
