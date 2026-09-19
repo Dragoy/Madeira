@@ -234,10 +234,12 @@ jobs:
             app/Madeira/libhogweed.a
             app/Madeira/libnettle.a
             app/Madeira/libgmp.a
-          key: madeira-gnutls-ios16.5-v1-${{ hashFiles('build/gnutls-ios/**') }}
+          key: madeira-gnutls-ios16.5-v2-${{ hashFiles('build/gnutls-ios/build.sh', 'build/gnutls-ios/src/SHA256SUMS') }}
+          restore-keys: |
+            madeira-gnutls-ios16.5-v1-
 
       - name: Build GnuTLS stack for iOS 16.5
-        if: steps.cache-gnutls.outputs.cache-hit != 'true'
+        if: steps.cache-gnutls.outputs.cache-matched-key == ''
         run: |
           set -euxo pipefail
           rm -rf build/gnutls-ios/obj toolchains/gnutls-ios
@@ -257,7 +259,7 @@ jobs:
             app/Madeira/libhogweed.a
             app/Madeira/libnettle.a
             app/Madeira/libgmp.a
-          key: madeira-gnutls-ios16.5-v1-${{ hashFiles('build/gnutls-ios/**') }}
+          key: madeira-gnutls-ios16.5-v2-${{ hashFiles('build/gnutls-ios/build.sh', 'build/gnutls-ios/src/SHA256SUMS') }}
 
       - name: Restore FreeType iOS cache
         id: cache-freetype
@@ -266,10 +268,12 @@ jobs:
           path: |
             research/freetype
             build/freetype-ios/build
-          key: madeira-freetype-2.13.3-ios16.5-v1-${{ hashFiles('build/freetype-ios/**') }}
+          key: madeira-freetype-2.13.3-ios16.5-v2-${{ hashFiles('build/freetype-ios/build.sh') }}
+          restore-keys: |
+            madeira-freetype-2.13.3-ios16.5-v1-
 
       - name: Prepare and build FreeType for iOS 16.5
-        if: steps.cache-freetype.outputs.cache-hit != 'true'
+        if: steps.cache-freetype.outputs.cache-matched-key == ''
         run: |
           set -euxo pipefail
           rm -rf research/freetype build/freetype-ios/build
@@ -284,7 +288,7 @@ jobs:
           path: |
             research/freetype
             build/freetype-ios/build
-          key: madeira-freetype-2.13.3-ios16.5-v1-${{ hashFiles('build/freetype-ios/**') }}
+          key: madeira-freetype-2.13.3-ios16.5-v2-${{ hashFiles('build/freetype-ios/build.sh') }}
 
       - name: Patch FEX native-iOS diagnostics
         run: |
@@ -389,10 +393,12 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: app/Madeira/libwineserver.a
-          key: madeira-wineserver-ios16.5-v2-${{ steps.deps.outputs.wine }}-${{ hashFiles('build/wineserver/**') }}
+          key: madeira-wineserver-ios16.5-v3-${{ steps.deps.outputs.wine }}-${{ hashFiles('build/wineserver/**/*.sh', 'build/wineserver/**/*.c', 'build/wineserver/**/*.h') }}
+          restore-keys: |
+            madeira-wineserver-ios16.5-v2-${{ steps.deps.outputs.wine }}-
 
       - name: Build wineserver for iOS 16.5
-        if: steps.cache-wineserver.outputs.cache-hit != 'true'
+        if: steps.cache-wineserver.outputs.cache-matched-key == ''
         run: |
           set -euxo pipefail
           export PATH="$GITHUB_WORKSPACE/toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin:$PATH"
@@ -411,14 +417,14 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: app/Madeira/libwineserver.a
-          key: madeira-wineserver-ios16.5-v2-${{ steps.deps.outputs.wine }}-${{ hashFiles('build/wineserver/**') }}
+          key: madeira-wineserver-ios16.5-v3-${{ steps.deps.outputs.wine }}-${{ hashFiles('build/wineserver/**/*.sh', 'build/wineserver/**/*.c', 'build/wineserver/**/*.h') }}
 
       - name: Restore ntdll iOS cache
         id: cache-ntdll
         uses: actions/cache/restore@v4
         with:
           path: app/Madeira/libntdll_unix.a
-          key: madeira-ntdll-ios16.5-v3-${{ steps.deps.outputs.wine }}-${{ hashFiles('build/ntdll-unix/**', 'build/crypto-unix/**') }}
+          key: madeira-ntdll-ios16.5-v4-${{ steps.deps.outputs.wine }}-${{ hashFiles('build/ntdll-unix/**/*.sh', 'build/ntdll-unix/**/*.c', 'build/ntdll-unix/**/*.h', 'build/crypto-unix/**/*.sh', 'build/crypto-unix/**/*.c', 'build/crypto-unix/**/*.h') }}
 
       - name: Build ntdll unix side for iOS 16.5
         if: steps.cache-ntdll.outputs.cache-hit != 'true'
@@ -434,14 +440,14 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: app/Madeira/libntdll_unix.a
-          key: madeira-ntdll-ios16.5-v3-${{ steps.deps.outputs.wine }}-${{ hashFiles('build/ntdll-unix/**', 'build/crypto-unix/**') }}
+          key: madeira-ntdll-ios16.5-v4-${{ steps.deps.outputs.wine }}-${{ hashFiles('build/ntdll-unix/**/*.sh', 'build/ntdll-unix/**/*.c', 'build/ntdll-unix/**/*.h', 'build/crypto-unix/**/*.sh', 'build/crypto-unix/**/*.c', 'build/crypto-unix/**/*.h') }}
 
       - name: Restore win32u iOS cache
         id: cache-win32u
         uses: actions/cache/restore@v4
         with:
           path: app/Madeira/libwin32u_unix.a
-          key: madeira-win32u-ios16.5-v2-${{ steps.deps.outputs.wine }}-${{ hashFiles('build/win32u-unix/**', 'build/freetype-ios/**') }}
+          key: madeira-win32u-ios16.5-v3-${{ steps.deps.outputs.wine }}-${{ hashFiles('build/win32u-unix/**/*.sh', 'build/win32u-unix/**/*.c', 'build/win32u-unix/**/*.h', 'build/freetype-ios/build.sh') }}
 
       - name: Build win32u unix side for iOS 16.5
         if: steps.cache-win32u.outputs.cache-hit != 'true'
@@ -457,7 +463,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: app/Madeira/libwin32u_unix.a
-          key: madeira-win32u-ios16.5-v2-${{ steps.deps.outputs.wine }}-${{ hashFiles('build/win32u-unix/**', 'build/freetype-ios/**') }}
+          key: madeira-win32u-ios16.5-v3-${{ steps.deps.outputs.wine }}-${{ hashFiles('build/win32u-unix/**/*.sh', 'build/win32u-unix/**/*.c', 'build/win32u-unix/**/*.h', 'build/freetype-ios/build.sh') }}
 
       - name: Restore LLVM 15 iOS cache
         id: cache-llvm
@@ -558,7 +564,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: app/Madeira/libdxmt_combined.a
-          key: madeira-dxmt-ios16.5-v2-${{ steps.deps.outputs.dxmt }}-${{ hashFiles('build/dxmt-ios/**') }}
+          key: madeira-dxmt-ios16.5-v3-${{ steps.deps.outputs.dxmt }}-${{ hashFiles('build/dxmt-ios/**/*.sh', 'build/dxmt-ios/**/*.c', 'build/dxmt-ios/**/*.h') }}
 
       - name: Build DXMT unix side for iOS 16.5
         if: steps.cache-dxmt.outputs.cache-hit != 'true'
@@ -582,7 +588,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: app/Madeira/libdxmt_combined.a
-          key: madeira-dxmt-ios16.5-v2-${{ steps.deps.outputs.dxmt }}-${{ hashFiles('build/dxmt-ios/**') }}
+          key: madeira-dxmt-ios16.5-v3-${{ steps.deps.outputs.dxmt }}-${{ hashFiles('build/dxmt-ios/**/*.sh', 'build/dxmt-ios/**/*.c', 'build/dxmt-ios/**/*.h') }}
 
       - name: Inventory remaining native app libraries
         run: |
