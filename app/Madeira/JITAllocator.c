@@ -3,6 +3,7 @@
 #include <mach/mach.h>
 #include <mach/vm_map.h>
 #include <sys/mman.h>
+#include <sys/sysctl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -61,6 +62,13 @@ struct JITRegion {
     size_t size;        // Size of the region
     mach_port_t mem_entry;  // Memory entry port for cleanup
 };
+
+// Retain BRK-free pools for process lifetime. Multiple consumers (the main
+// Wine pool and the standalone FEX test pool) must not alias the same object.
+#define MAX_DIRECT_JIT_REGIONS 8
+static JITRegion *g_direct_jit_regions[MAX_DIRECT_JIT_REGIONS];
+static size_t g_direct_jit_region_count = 0;
+static pthread_mutex_t g_direct_jit_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static jit_log_callback_t g_log_callback = NULL;
 
@@ -420,6 +428,64 @@ void jit26_detach(void) {
         "brk #0xf00d\n"
         ::: "x16", "memory"
     );
+}
+
+bool jit_is_traced(void) {
+    struct kinfo_proc info;
+    memset(&info, 0, sizeof(info));
+    size_t size = sizeof(info);
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid() };
+    if (sysctl(mib, 4, &info, &size, NULL, 0) != 0) return false;
+    return (info.kp_proc.p_flag & P_TRACED) != 0;
+}
+
+bool jit_direct_pool_create(size_t size, void **rx_out, void **rw_out) {
+    if (!rx_out || !rw_out || !size) return false;
+    *rx_out = NULL;
+    *rw_out = NULL;
+
+    if (!jit_check_debugged()) {
+        jit_log("Direct JIT pool refused: CS_DEBUGGED is not set");
+        return false;
+    }
+
+    pthread_mutex_lock(&g_direct_jit_lock);
+    if (g_direct_jit_region_count >= MAX_DIRECT_JIT_REGIONS) {
+        pthread_mutex_unlock(&g_direct_jit_lock);
+        jit_log("Direct JIT pool refused: retained-region limit reached");
+        return false;
+    }
+
+    JITRegion *region = jit_region_create(size);
+    if (!region) {
+        pthread_mutex_unlock(&g_direct_jit_lock);
+        jit_log("Direct JIT pool creation failed for %zu MB", size >> 20);
+        return false;
+    }
+
+    uintptr_t rx = (uintptr_t)region->rx_ptr;
+    const uintptr_t good_low = 0x119000000ULL;
+    const uintptr_t guest_lo = 0x7000000000ULL;
+    const uintptr_t guest_hi = 0x8000000000ULL;
+    bool in_guest_window = rx + size > guest_lo && rx < guest_hi;
+
+    if (rx < good_low || in_guest_window) {
+        jit_log("Direct JIT pool landed at rejected RX=%p size=%zuMB (%s)",
+                region->rx_ptr, size >> 20,
+                rx < good_low ? "below FEX low bound" : "inside guest VA window");
+        jit_region_destroy(region);
+        pthread_mutex_unlock(&g_direct_jit_lock);
+        return false;
+    }
+
+    g_direct_jit_regions[g_direct_jit_region_count++] = region;
+    *rx_out = region->rx_ptr;
+    *rw_out = region->rw_ptr;
+    pthread_mutex_unlock(&g_direct_jit_lock);
+
+    jit_log("Direct TrollStore JIT pool retained: RX=%p RW=%p size=%zuMB",
+            *rx_out, *rw_out, size >> 20);
+    return true;
 }
 
 bool jit_check_debugged(void) {
