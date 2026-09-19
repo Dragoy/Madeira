@@ -1,53 +1,79 @@
 #!/usr/bin/env python3
-"""Generate Wine's complete declared IDL header set, not a guessed subset."""
+"""Generate every concrete Wine header target declared by the configured build."""
+
 import argparse
 import os
-from pathlib import Path, PurePosixPath
-import re
-import shlex
+from pathlib import Path
 import subprocess
 
 
 def header_targets(makefile_text: str) -> list[str]:
-    flattened = re.sub(r'\\\r?\n', ' ', makefile_text)
-    match = re.search(r'^SOURCES\s*=\s*(.*)$', flattened, re.MULTILINE)
-    if not match:
-        raise ValueError('No SOURCES assignment in Wine include/Makefile.in')
-    names = shlex.split(match.group(1), comments=True)
-    targets = set()
-    for name in names:
-        path = PurePosixPath(name)
-        if path.suffix != '.idl':
+    """Return concrete include/*.h targets that Wine's configured Makefile can build."""
+    targets: set[str] = set()
+
+    for raw in makefile_text.splitlines():
+        # Recipe lines, comments and variable assignments are not target rules.
+        if not raw or raw[0].isspace() or raw.startswith("#") or ":" not in raw:
             continue
-        if path.is_absolute() or '..' in path.parts:
-            raise ValueError(f'Unsafe IDL source path: {name}')
-        targets.add('include/' + str(path.with_suffix('.h')))
+
+        lhs = raw.split(":", 1)[0]
+        if "=" in lhs:
+            continue
+
+        for token in lhs.split():
+            if (
+                token.startswith("include/")
+                and token.endswith(".h")
+                and "$" not in token
+                and "%" not in token
+            ):
+                targets.add(token)
+
     if not targets:
-        raise ValueError('Wine manifest declares no IDL headers')
+        raise ValueError("Configured Wine Makefile declares no concrete include/*.h targets")
     return sorted(targets)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--root', type=Path, default=Path(__file__).resolve().parents[2])
+    parser.add_argument(
+        "--root", type=Path, default=Path(__file__).resolve().parents[2]
+    )
     args = parser.parse_args()
+
     root = args.root.resolve()
-    source = root / 'wine'
-    build = source / 'build-macos'
-    targets = header_targets((source / 'include/Makefile.in').read_text())
-    # Some IDLs intentionally coexist with a checked-in public header.
-    targets = [h for h in targets if not (source / h).is_file()]
-    if not (build / 'Makefile').is_file():
-        raise SystemExit('Configure Wine build-macos before generating IDL headers')
+    source = root / "wine"
+    build = source / "build-macos"
+    makefile = build / "Makefile"
+
+    if not makefile.is_file():
+        raise SystemExit("Configure Wine build-macos before generating headers")
+
+    targets = header_targets(makefile.read_text(errors="replace"))
+
     env = os.environ.copy()
-    env['PATH'] = str(root / 'toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin') + ':/opt/homebrew/opt/bison/bin:' + env['PATH']
-    print(f'Generating all {len(targets)} declared Wine IDL headers', flush=True)
-    subprocess.run(['make', '-C', str(build), '-j3', *targets], check=True, env=env)
-    missing = [h for h in targets if not (build / h).is_file()]
+    env["PATH"] = (
+        str(root / "toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin")
+        + ":/opt/homebrew/opt/bison/bin:"
+        + env["PATH"]
+    )
+
+    print(
+        f"Generating {len(targets)} concrete Wine header targets from configured Makefile",
+        flush=True,
+    )
+    subprocess.run(
+        ["make", "-C", str(build), "-j3", *targets],
+        check=True,
+        env=env,
+    )
+
+    missing = [target for target in targets if not (build / target).is_file()]
     if missing:
-        raise SystemExit('Header generation incomplete: ' + ', '.join(missing))
-    print(f'Verified {len(targets)} generated headers', flush=True)
+        raise SystemExit("Header generation incomplete: " + ", ".join(missing))
+
+    print(f"Verified {len(targets)} generated Wine headers", flush=True)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
