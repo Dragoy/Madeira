@@ -6042,6 +6042,99 @@ static void setup_exception( ucontext_t *sigcontext, EXCEPTION_RECORD *rec )
  *         1 = state rewritten to enter KiUserExceptionDispatcher,
  *         2 = fault serviced by page machinery (guard/watch): plain retry.
  */
+/* ml763: Mach guest-delivery stack ownership helpers.
+ *
+ * ARM64EC has TWO legitimate stacks for one Wine TEB:
+ *   1) Tib/DeallocationStack -- the Windows/native thread stack;
+ *   2) ChpeV2CpuAreaInfo::EmulatorStackLimit..Base -- FEX's 256KB host stack.
+ *
+ * The old ml378 fallback treated any writable SP as an exception stack. A
+ * redelivery storm therefore walked the emulator SP below its limit and kept
+ * writing dispatch frames into unrelated host allocations. Keep all probing
+ * fault-safe because this code runs on the TEB-less Mach exception server. */
+static int ios_mach_read_u64( const void *addr, uint64_t *value )
+{
+    mach_vm_size_t got = 0;
+    return mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)(uintptr_t)addr,
+                                   sizeof(*value), (mach_vm_address_t)value, &got ) == KERN_SUCCESS
+           && got == sizeof(*value);
+}
+
+static int ios_mach_get_teb_stack_bounds( TEB *teb,
+                                          uint64_t *native_lo, uint64_t *native_hi,
+                                          uint64_t *emu_lo, uint64_t *emu_hi )
+{
+    uint64_t self = 0, cpu = 0;
+
+    *native_lo = *native_hi = *emu_lo = *emu_hi = 0;
+    if (!teb || !ios_mach_read_u64( &teb->Tib.Self, &self ) || self != (uint64_t)(uintptr_t)teb)
+        return 0;
+    if (!ios_mach_read_u64( &teb->DeallocationStack, native_lo ) ||
+        !ios_mach_read_u64( &teb->Tib.StackBase, native_hi ))
+        return 0;
+
+    if (ios_mach_read_u64( &teb->ChpeV2CpuAreaInfo, &cpu ) && cpu >= 0x10000)
+    {
+        CHPE_V2_CPU_AREA_INFO *area = (CHPE_V2_CPU_AREA_INFO *)(uintptr_t)cpu;
+        if (!ios_mach_read_u64( &area->EmulatorStackLimit, emu_lo ) ||
+            !ios_mach_read_u64( &area->EmulatorStackBase, emu_hi ))
+            *emu_lo = *emu_hi = 0;
+    }
+    return 1;
+}
+
+static int ios_mach_range_writable( uint64_t lo, uint64_t hi )
+{
+    mach_vm_address_t a = (mach_vm_address_t)lo;
+    while (a < hi)
+    {
+        mach_vm_address_t q = a;
+        mach_vm_size_t sz = 0;
+        vm_region_basic_info_data_64_t info;
+        mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t obj = MACH_PORT_NULL;
+
+        if (mach_vm_region( mach_task_self(), &q, &sz, VM_REGION_BASIC_INFO_64,
+                            (vm_region_info_t)&info, &cnt, &obj ) != KERN_SUCCESS ||
+            q > a || !(info.protection & VM_PROT_WRITE))
+            return 0;
+        a = q + sz;
+    }
+    return 1;
+}
+
+static int ios_mach_redirect_guest_abort( arm_thread_state64_t *state, TEB *teb,
+                                          const char *reason )
+{
+    extern void abort_thread( int status );
+    uint64_t nlo, nhi, elo, ehi, lo, hi, safe_sp, workspace_lo;
+
+    if (!ios_mach_get_teb_stack_bounds( teb, &nlo, &nhi, &elo, &ehi )) return 0;
+
+    /* Prefer the CHPE emulator stack: this is the stack FEX/JIT code was
+     * executing on, and resetting near its top avoids borrowing unrelated
+     * host/pthread memory. Fall back to the Wine native stack if needed. */
+    if (elo && ehi > elo + 0x10000) { lo = elo; hi = ehi; }
+    else                            { lo = nlo; hi = nhi; }
+    if (!lo || hi <= lo + 0x10000) return 0;
+
+    safe_sp = (hi - 0x4000) & ~0xfull;
+    workspace_lo = safe_sp - 0x4000;
+    if (workspace_lo <= lo || !ios_mach_range_writable( workspace_lo, safe_sp ))
+        return 0;
+
+    dprintf( 2, "[mach-deliver] ml763 TERMINAL unsafe guest stack: %s; "
+                "teb=%p -> abort_thread(1) on owned stack [0x%llx..0x%llx] safe_sp=0x%llx\n",
+             reason, teb, (unsigned long long)lo, (unsigned long long)hi,
+             (unsigned long long)safe_sp );
+
+    state->__x[0] = 1;
+    state->__x[18] = (uint64_t)(uintptr_t)teb;
+    __darwin_arm_thread_state64_set_sp( state, safe_sp );
+    __darwin_arm_thread_state64_set_pc_fptr( state, (void *)abort_thread );
+    return 1;
+}
+
 static int ios_mach_deliver_guest_exception_inner( thread_t thread, arm_thread_state64_t *state,
                                                    arm_neon_state64_t *neon, int have_neon,
                                                    int exception, uintptr_t fault_addr,
@@ -6058,6 +6151,7 @@ static int ios_mach_deliver_guest_exception_inner( thread_t thread, arm_thread_s
     uint64_t pc = arm_thread_state64_get_pc( *state );
     uintptr_t rxb = (uintptr_t)ios_jit_rx_base_global;
     TEB *teb = NULL;
+    TEB *fallback_teb = NULL;
     void *dispatcher;
     EXCEPTION_RECORD rec = { 0 };
     struct exc_stack_layout frame;
@@ -6091,127 +6185,83 @@ static int ios_mach_deliver_guest_exception_inner( thread_t thread, arm_thread_s
 
         for (i = 0; i < 2; i++)
         {
-            uint64_t self = 0, base = 0, dealloc = 0;
-            mach_vm_size_t got = 0;
+            TEB *candidate;
+            uint64_t nlo, nhi, elo, ehi;
+            int on_native, on_emulator;
 
             if (cand[i] < 0x10000 || (cand[i] & 0xfff)) continue;
-            if (mach_vm_read_overwrite( mach_task_self(),
-                    (mach_vm_address_t)(cand[i] + 0x30), 8,
-                    (mach_vm_address_t)&self, &got ) != KERN_SUCCESS
-                || got != 8 || self != cand[i])
+            if (i && cand[i] == cand[0]) continue;
+            candidate = (TEB *)(uintptr_t)cand[i];
+            if (!ios_mach_get_teb_stack_bounds( candidate, &nlo, &nhi, &elo, &ehi ))
                 continue;
-            if (mach_vm_read_overwrite( mach_task_self(),
-                    (mach_vm_address_t)(cand[i] + 0x08), 8,
-                    (mach_vm_address_t)&base, &got ) != KERN_SUCCESS || got != 8)
-                continue;
-            if (mach_vm_read_overwrite( mach_task_self(),
-                    (mach_vm_address_t)(cand[i] + 0x1478), 8,
-                    (mach_vm_address_t)&dealloc, &got ) != KERN_SUCCESS || got != 8)
-                continue;
-            if (sp > dealloc && sp <= base)
+
+            if (!fallback_teb) fallback_teb = candidate;
+            on_native = sp > nlo && sp <= nhi;
+            on_emulator = elo && sp >= elo && sp <= ehi;
+            if (on_native || on_emulator)
             {
-                teb = (TEB *)(uintptr_t)cand[i];
+                teb = candidate;
+                if (deliver_logs < 24)
+                    dprintf( 2, "[mach-deliver] ml763 teb cand%d=%p OWNS sp=0x%llx via %s "
+                                "native=(0x%llx,0x%llx] emu=[0x%llx,0x%llx]\n",
+                             i, candidate, (unsigned long long)sp,
+                             on_emulator ? "CHPE-EMULATOR" : "NATIVE",
+                             (unsigned long long)nlo, (unsigned long long)nhi,
+                             (unsigned long long)elo, (unsigned long long)ehi );
                 break;
             }
+
             if (deliver_logs < 24)
-                dprintf( 2, "[mach-deliver] rev=ml372 teb cand%d=0x%llx stack=(0x%llx,0x%llx] does NOT contain sp=0x%llx\n",
-                         i, (unsigned long long)cand[i], (unsigned long long)dealloc,
-                         (unsigned long long)base, (unsigned long long)sp );
+                dprintf( 2, "[mach-deliver] ml763 teb cand%d=%p owns NEITHER stack for sp=0x%llx "
+                            "native=(0x%llx,0x%llx] emu=[0x%llx,0x%llx]\n",
+                         i, candidate, (unsigned long long)sp,
+                         (unsigned long long)nlo, (unsigned long long)nhi,
+                         (unsigned long long)elo, (unsigned long long)ehi );
         }
+
         if (!teb)
         {
-            /* ml540: NATIVE (non-guest) THREAD -> DECLINE, before best-effort.
-             *
-             * ml539 was the first run of a guest exe that EXITS. After Wine's
-             * clean teardown the SwiftUI UI thread faulted inside ICU
-             * (ContentView.timeString -> udat_open -> SimpleDateFormat::
-             * initialize -> _platform_strcmp) on a pointer into the dead Wine
-             * thread's stack. Nothing to do with the guest — but the TASK-level
-             * port we claimed for #67 routes it here anyway, and the ml378 path
-             * below then pushed a guest exception frame onto a NATIVE stack.
-             * One native crash became a 50-deep fault loop (footprint climbed
-             * 1271->1800MB) that [fault-stuck] had to break with abort_thread.
-             *
-             * ml378's reason for never declining is also gone: it declined into
-             * an ATTACHED StikDebug, which could not turn the fault into a
-             * signal and re-stopped until the script killed the app at 8 stops.
-             * We now detach early (#67), so a decline is KERN_FAILURE -> the
-             * kernel's default handler -> an honest iOS crash report naming the
-             * real faulting frame, which is strictly better than a fabricated
-             * guest delivery that cannot work.
-             *
-             * All three conditions are required, so a genuine guest thread whose
-             * stack we merely failed to attribute still gets best-effort:
-             *   - not in the thread registry (exact match, no slot-0 fallback)
-             *   - x18 == 0 (carries no guest TEB)
-             *   - pc is inside a Mach-O image and OUTSIDE the JIT pool, i.e.
-             *     host/system code (guest code runs from the pool, and PE
-             *     modules are not Mach-O images so dladdr cannot name them) */
-            {
-                int in_pool = rxb && pc >= rxb && pc < rxb + ios_jit_pool_size_global;
-                Dl_info dli;
+            /* A task-level Mach exception can also belong to a native UIKit/
+             * system thread. Preserve the ml540 decline for those. */
+            int in_pool = rxb && pc >= rxb && pc < rxb + ios_jit_pool_size_global;
+            Dl_info dli;
 
-                if (!ios_thread_is_registered( thread ) && state->__x[18] == 0 && !in_pool
-                    && dladdr( (const void *)(uintptr_t)pc, &dli ) != 0)
+            if (!ios_thread_is_registered( thread ) && state->__x[18] == 0 && !in_pool
+                && dladdr( (const void *)(uintptr_t)pc, &dli ) != 0)
+            {
+                static int native_declines;
+                if (native_declines < 16)
                 {
-                    static int native_declines;
-                    if (native_declines < 16)
-                    {
-                        native_declines++;
-                        dprintf( 2, "[mach-deliver] rev=ml540 NATIVE-THREAD DECLINE pc=0x%llx (%s`%s) "
-                                    "sp=0x%llx addr=0x%llx -> kernel default handler\n",
-                                 (unsigned long long)pc,
-                                 dli.dli_fname ? dli.dli_fname : "?",
-                                 dli.dli_sname ? dli.dli_sname : "?",
-                                 (unsigned long long)sp, (unsigned long long)fault_addr );
-                    }
-                    return 0;
+                    native_declines++;
+                    dprintf( 2, "[mach-deliver] ml763 NATIVE-THREAD DECLINE pc=0x%llx (%s`%s) "
+                                "sp=0x%llx addr=0x%llx -> kernel default handler\n",
+                             (unsigned long long)pc,
+                             dli.dli_fname ? dli.dli_fname : "?",
+                             dli.dli_sname ? dli.dli_sname : "?",
+                             (unsigned long long)sp, (unsigned long long)fault_addr );
                 }
+                return 0;
             }
 
-            /* ml378: BEST-EFFORT DELIVERY instead of declining.
-             *
-             * ml372 declined here because a frame outside the TEB's stack made
-             * call_seh_handlers reject it and NtRaiseException kill the process.
-             * But declining is not the safe option it looked like: while
-             * StikDebug is attached the declined fault cannot be converted to a
-             * BSD signal at all, so it repeats until the script kills the WHOLE
-             * app after 8 stops — which is exactly how ml378 died
-             * (`DECLINE pc=0x14f5e36cc … no TEB owns this stack`, 8 repeats).
-             *
-             * The reason for declining is also gone: the ml377 ntdll fix makes a
-             * first-step bad frame an ordinary UNHANDLED exception rather than
-             * EXCEPTION_STACK_INVALID + immediate terminate. So delivering on the
-             * guest's own stack now degrades to "the guest sees an unhandled
-             * exception" (its filter runs, its pseudo-process dies) instead of
-             * taking everything down.
-             *
-             * Use any SELF-CONSISTENT TEB (Tib.Self check already done above);
-             * virtual_setup_exception's "outside thread stack" branch handles the
-             * frame placement and verifies writability. */
-            uint64_t cand2[2] = { state->__x[18], (uint64_t)thread_teb };
-            int j;
-            for (j = 0; j < 2 && !teb; j++)
-            {
-                uint64_t self = 0;
-                mach_vm_size_t got = 0;
-                if (cand2[j] < 0x10000 || (cand2[j] & 0xfff)) continue;
-                if (mach_vm_read_overwrite( mach_task_self(),
-                        (mach_vm_address_t)(cand2[j] + 0x30), 8,
-                        (mach_vm_address_t)&self, &got ) == KERN_SUCCESS
-                    && got == 8 && self == cand2[j])
-                    teb = (TEB *)(uintptr_t)cand2[j];
-            }
+            /* Never resurrect ml378's "any writable memory is a stack" rule.
+             * If a self-consistent guest TEB exists but SP is outside BOTH its
+             * native and emulator stacks, terminate only that Wine thread on
+             * a reset, owned stack. This is terminal guest corruption, not a
+             * dispatchable exception. */
+            if (fallback_teb &&
+                ios_mach_redirect_guest_abort( state, fallback_teb,
+                                               "SP outside native + CHPE emulator stack" ))
+                return 1;
+
             if (deliver_logs < 24)
             {
                 deliver_logs++;
-                dprintf( 2, "[mach-deliver] rev=ml378 no TEB owns sp=0x%llx (pc=0x%llx x18=0x%llx "
-                            "registry=0x%llx) -> %s\n",
+                dprintf( 2, "[mach-deliver] ml763 DECLINE: no owned guest stack and no safe abort "
+                            "teb (sp=0x%llx pc=0x%llx x18=0x%llx registry=0x%llx)\n",
                          (unsigned long long)sp, (unsigned long long)pc,
-                         (unsigned long long)state->__x[18], (unsigned long long)thread_teb,
-                         teb ? "BEST-EFFORT delivery on guest stack" : "DECLINE (no usable TEB at all)" );
+                         (unsigned long long)state->__x[18], (unsigned long long)thread_teb );
             }
-            if (!teb) return 0;
+            return 0;
         }
         thread_teb = (uintptr_t)teb;
     }
@@ -6464,10 +6514,14 @@ dispatch:
         if (deliver_logs < 24)
         {
             deliver_logs++;
-            dprintf( 2, "[mach-deliver] rev=ml369 CANNOT deliver pc=0x%llx addr=0x%llx sp=0x%llx (frame unwritable)\n",
+            dprintf( 2, "[mach-deliver] ml763 CANNOT deliver pc=0x%llx addr=0x%llx sp=0x%llx "
+                        "(frame would leave owned stack / is unwritable)\n",
                      (unsigned long long)pc, (unsigned long long)fault_addr,
                      (unsigned long long)SP_sig(&uc) );
         }
+        if (ios_mach_redirect_guest_abort( state, teb,
+                                           "exception frame would leave owned stack" ))
+            return 1;
         return 0;
     }
 
