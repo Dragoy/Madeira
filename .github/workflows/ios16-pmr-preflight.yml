@@ -1,0 +1,33 @@
+name: Madeira PMR iOS16 ABI regression
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - app/Madeira/LibcppPMRCompat.cpp
+      - tools/ci/test_pmr_ios16.sh
+      - .github/workflows/ios16-pmr-preflight.yml
+permissions:
+  contents: read
+concurrency:
+  group: madeira-pmr-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  pmr:
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Select tested Apple toolchain
+        run: sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
+      - name: Test PMR definitions and imports for iOS16 and iOS17
+        run: bash tools/ci/test_pmr_ios16.sh
+      - name: Retain ABI regression evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: madeira-pmr-abi-evidence
+          path: ${{ runner.temp }}/madeira-pmr-preflight
+          if-no-files-found: error

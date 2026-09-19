@@ -1,37 +1,20 @@
-// Compatibility ABI shim for std::__1::pmr::memory_resource on iOS 16.
+// Back-deploy only the PMR base-class key function required by FEX.
+// Apple's system libc++ provides this ABI from iOS 17 onward. The iOS 16
+// executable must provide it itself; other libc++ facilities stay in libc++.
 //
-// Apple first shipped libc++16 PMR runtime symbols in iOS 17. Xcode 26 can
-// nevertheless emit references to the out-of-line memory_resource destructor
-// when targeting iOS 16, which causes dyld to abort before main().
-//
-// Do not include <memory_resource> here: its _LIBCPP_EXPORTED_FROM_ABI
-// annotations preserve two-level ownership by /usr/lib/libc++.1.dylib. Instead
-// declare the exact Itanium ABI class shape in libc++'s ABI namespace and
-// provide its key function locally. This causes clang to emit strong local
-// destructor/vtable/RTTI definitions that satisfy FEX's PMR references.
-#include <stddef.h>
+// Use the compiler's actual deployment-target macro. The earlier spelling
+// __IPHONE_OS_VERSION_MIN_REQUIRED__ is not defined and made this TU empty.
+#if defined(__APPLE__) && defined(__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__) && \
+    __ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__ < 170000
 
-#if defined(__APPLE__) && defined(__IPHONE_OS_VERSION_MIN_REQUIRED__) && __IPHONE_OS_VERSION_MIN_REQUIRED__ < 170000
+#include <memory_resource>
 
-namespace std {
-inline namespace __1 {
+// Use this SDK's real class declaration and ABI namespace, not a copied
+// internal header or a second, potentially incompatible class definition.
+_LIBCPP_BEGIN_NAMESPACE_STD
 namespace pmr {
-
-class __attribute__((visibility("default"))) memory_resource {
-public:
-  virtual ~memory_resource();
-
-private:
-  virtual void* do_allocate(::size_t, ::size_t) = 0;
-  virtual void do_deallocate(void*, ::size_t, ::size_t) = 0;
-  virtual bool do_is_equal(memory_resource const&) const noexcept = 0;
-};
-
-__attribute__((visibility("default"), used, noinline))
-memory_resource::~memory_resource() {}
-
-} // namespace pmr
-} // inline namespace __1
-} // namespace std
+memory_resource::~memory_resource() = default;
+}
+_LIBCPP_END_NAMESPACE_STD
 
 #endif

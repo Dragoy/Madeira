@@ -240,7 +240,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: FEX/build-ios
-          key: madeira-fex-ios16.5-v3-${{ steps.deps.outputs.fex }}-${{ hashFiles('compat/libcxx-ios16/**') }}
+          key: madeira-fex-ios16.5-v2-${{ steps.deps.outputs.fex }}
       - name: Configure FEX for iOS 16.5
         if: steps.cache-fex.outputs.cache-hit != 'true'
         run: |
@@ -249,7 +249,7 @@ jobs:
             -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphoneos \
             -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_SYSTEM_PROCESSOR=arm64 \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=16.5 \
-            -DCMAKE_C_FLAGS="-DFEX_IOS_HOST=1" -DCMAKE_CXX_FLAGS="-DFEX_IOS_HOST=1 -I$GITHUB_WORKSPACE/compat/libcxx-ios16" -DCMAKE_ASM_FLAGS="-DFEX_IOS_HOST=1" \
+            -DCMAKE_C_FLAGS="-DFEX_IOS_HOST=1" -DCMAKE_CXX_FLAGS="-DFEX_IOS_HOST=1" -DCMAKE_ASM_FLAGS="-DFEX_IOS_HOST=1" \
             -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DTUNE_CPU=none \
             -DENABLE_LTO=OFF -DENABLE_OFFLINE_TELEMETRY=OFF -DENABLE_ASAN=OFF -DENABLE_TSAN=OFF -DENABLE_UBSAN=OFF
       - name: Build FEX libraries
@@ -262,7 +262,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: FEX/build-ios
-          key: madeira-fex-ios16.5-v3-${{ steps.deps.outputs.fex }}-${{ hashFiles('compat/libcxx-ios16/**') }}
+          key: madeira-fex-ios16.5-v2-${{ steps.deps.outputs.fex }}
       - name: Verify FEX libraries used by Xcode
         run: |
           set -euo pipefail
