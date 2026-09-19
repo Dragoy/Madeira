@@ -21,48 +21,61 @@ enum StikJITHelper {
         return scriptBase64
     }
 
-    /// Check if StikDebug or StikJIT is available by trying to open their URL.
+    /// iOS 16/17.0 uses TrollStore's own JIT launcher. StikJIT/StikDebug
+    /// only supports iOS 17.4+, so never route older systems through it.
     static var isAvailable: Bool {
-        guard let url = URL(string: "stikjit://enable-jit") else { return false }
+        let scheme: String
+        if #available(iOS 17.4, *) {
+            scheme = "stikjit://enable-jit"
+        } else {
+            scheme = "apple-magnifier://enable-jit"
+        }
+        guard let url = URL(string: scheme) else { return false }
         return UIApplication.shared.canOpenURL(url)
     }
 
-    /// Open StikDebug with our JIT script embedded in the URL.
-    /// StikDebug will attach to our process and run the script.
     static func enableJIT(completion: @escaping (Bool) -> Void) {
-        let bundleId = Bundle.main.bundleIdentifier ?? "com.madeira.emulator"
+        let bundleId = Bundle.main.bundleIdentifier ?? "com.willfaust.mythicemu"
+        let urlString: String
 
-        // Build the URL with script data
-        let scriptData = resolvedScriptBase64.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-        let urlString = "stikjit://enable-jit?bundle-id=\(bundleId)&script-data=\(scriptData)"
+        if #available(iOS 17.4, *) {
+            let scriptData = resolvedScriptBase64.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+            urlString = "stikjit://enable-jit?bundle-id=\(bundleId)&script-data=\(scriptData)"
+            LogStore.shared.log("Opening StikDebug to enable JIT...")
+        } else {
+            urlString = "apple-magnifier://enable-jit?bundle-id=\(bundleId)"
+            LogStore.shared.log("Opening TrollStore to launch Madeira with JIT...")
+        }
 
         guard let url = URL(string: urlString) else {
-            LogStore.shared.log("Failed to build StikJIT URL", level: .error)
+            LogStore.shared.log("Failed to build JIT URL", level: .error)
             completion(false)
             return
         }
 
-        LogStore.shared.log("Opening StikDebug to enable JIT...")
-
         UIApplication.shared.open(url, options: [:]) { success in
             if !success {
-                LogStore.shared.log("Failed to open StikDebug. Is it installed?", level: .error)
+                LogStore.shared.log("Failed to open JIT provider", level: .error)
                 completion(false)
                 return
             }
-
-            // Poll for CS_DEBUGGED flag
             pollForJIT(completion: completion)
         }
     }
 
-    /// Poll every 0.5s until CS_DEBUGGED is set, then call completion.
+    /// Poll for CS_DEBUGGED, but fail cleanly instead of leaving an immortal timer.
     private static func pollForJIT(completion: @escaping (Bool) -> Void) {
+        var attempts = 0
         Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { timer in
+            attempts += 1
             if jit_check_debugged() {
                 timer.invalidate()
                 LogStore.shared.log("JIT enabled! (CS_DEBUGGED set)", level: .success)
                 completion(true)
+            } else if attempts >= 60 {
+                timer.invalidate()
+                LogStore.shared.log("Timed out waiting for JIT", level: .error)
+                completion(false)
             }
         }
     }
