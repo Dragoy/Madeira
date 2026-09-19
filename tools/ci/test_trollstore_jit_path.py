@@ -3,6 +3,7 @@ from pathlib import Path
 
 root = Path(__file__).resolve().parents[2]
 helper = (root / "app/Madeira/StikJITHelper.swift").read_text()
+wine_bridge = (root / "app/Madeira/WineProcessBridge.m").read_text()
 content = (root / "app/Madeira/ContentView.swift").read_text()
 bridge = (root / "app/Madeira/FEXBridge.mm").read_text()
 header = (root / "app/Madeira/JITAllocator.h").read_text()
@@ -21,6 +22,10 @@ checks = {
     "SIGTRAP fallback is installed when TrollStore detached":
         "void jit_install_trap_handler(void)" in (root / "app/Madeira/JITAllocator.c").read_text()
         and "if (jit_is_traced())" in (root / "app/Madeira/JITAllocator.c").read_text(),
+    "Wine x64 path derives alias offset from production WINE_IOS_JIT mappings":
+        'getenv("WINE_IOS_JIT_RX")' in wine_bridge
+        and 'getenv("WINE_IOS_JIT_RW")' in wine_bridge
+        and '(int64_t)(rw - rx)' in wine_bridge,
     "JIT badge follows sticky CS_DEBUGGED rather than P_TRACED":
         'entitlementBadge("JIT", granted: jitEnabled)' in content,
 }
