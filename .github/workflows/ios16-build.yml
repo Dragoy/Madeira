@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: madeira-ios16-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   prepare-vcruntime:
     runs-on: windows-latest
