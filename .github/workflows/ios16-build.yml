@@ -210,6 +210,8 @@ jobs:
             include/d3dcommon.h \
             include/d3d10.h \
             include/d3d10sdklayers.h \
+            include/d3d10shader.h \
+            include/d3d10effect.h \
             include/d3d10_1.h \
             include/dcommon.h \
             include/d2d1.h \
@@ -217,7 +219,7 @@ jobs:
             include/dwrite_1.h \
             include/dwrite_2.h \
             include/dwrite_3.h
-          for h in wtypesbase.h wtypes.h unknwn.h objidlbase.h objidl.h oaidl.h propidl.h oleidl.h ocidl.h servprov.h msxml.h urlmon.h dxgiformat.h dxgicommon.h dxgitype.h dxgi.h d3dcommon.h d3d10.h d3d10sdklayers.h d3d10_1.h dcommon.h d2d1.h dwrite.h dwrite_1.h dwrite_2.h dwrite_3.h; do
+          for h in wtypesbase.h wtypes.h unknwn.h objidlbase.h objidl.h oaidl.h propidl.h oleidl.h ocidl.h servprov.h msxml.h urlmon.h dxgiformat.h dxgicommon.h dxgitype.h dxgi.h d3dcommon.h d3d10.h d3d10sdklayers.h d3d10shader.h d3d10effect.h d3d10_1.h dcommon.h d2d1.h dwrite.h dwrite_1.h dwrite_2.h dwrite_3.h; do
             test -f "wine/build-macos/include/$h"
           done
 
