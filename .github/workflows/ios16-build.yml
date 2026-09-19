@@ -151,13 +151,16 @@ jobs:
           set -euxo pipefail
           export PATH="$GITHUB_WORKSPACE/toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin:/opt/homebrew/opt/bison/bin:$PATH"
           make -C wine/build-macos -j3 \
+            include/wtypesbase.h \
+            include/wtypes.h \
+            include/unknwn.h \
             include/objidlbase.h \
             include/objidl.h \
             include/oleidl.h \
             include/d2d1.h \
             include/dwrite.h \
             include/dwrite_3.h
-          for h in objidlbase.h objidl.h oleidl.h d2d1.h dwrite.h dwrite_3.h; do
+          for h in wtypesbase.h wtypes.h unknwn.h objidlbase.h objidl.h oleidl.h d2d1.h dwrite.h dwrite_3.h; do
             test -f "wine/build-macos/include/$h"
           done
 
