@@ -290,6 +290,95 @@ jobs:
           test -f app/Madeira/libwin32u_unix.a
           ls -lh app/Madeira/libwin32u_unix.a
 
+      - name: Build LLVM 15 static libraries for iOS 16.5
+        run: |
+          set -euxo pipefail
+          LLVM_TAG=llvmorg-15.0.7
+          LLVM_ROOT="$GITHUB_WORKSPACE/toolchains/llvm-project"
+          LLVM_HOST="$GITHUB_WORKSPACE/toolchains/llvm-host-build"
+          LLVM_IOS="$GITHUB_WORKSPACE/toolchains/llvm-ios-build"
+
+          if [ ! -d "$LLVM_ROOT/llvm" ]; then
+            rm -rf "$LLVM_ROOT"
+            mkdir -p "$GITHUB_WORKSPACE/toolchains"
+            curl -fL --retry 3 \
+              "https://github.com/llvm/llvm-project/archive/refs/tags/$LLVM_TAG.tar.gz" \
+              -o "$RUNNER_TEMP/llvm-project.tar.gz"
+            tar -xzf "$RUNNER_TEMP/llvm-project.tar.gz" -C "$GITHUB_WORKSPACE/toolchains"
+            mv "$GITHUB_WORKSPACE/toolchains/llvm-project-${LLVM_TAG#llvmorg-}" "$LLVM_ROOT"
+          fi
+
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("toolchains/llvm-project/llvm/cmake/modules/AddLLVM.cmake")
+          s = p.read_text()
+          old = 'MATCHES "Darwin"'
+          count = s.count(old)
+          if count:
+              s = s.replace(old, 'MATCHES "Darwin|iOS"')
+              p.write_text(s)
+          print("AddLLVM Darwin->iOS replacements:", count)
+          PY
+
+          rm -rf "$LLVM_HOST" "$LLVM_IOS"
+
+          cmake -S "$LLVM_ROOT/llvm" -B "$LLVM_HOST" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_TARGETS_TO_BUILD="" \
+            -DLLVM_ENABLE_PROJECTS="" \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_INCLUDE_DOCS=OFF \
+            -DLLVM_ENABLE_TERMINFO=OFF \
+            -DLLVM_ENABLE_ZLIB=OFF \
+            -DLLVM_ENABLE_ZSTD=OFF
+          cmake --build "$LLVM_HOST" --target llvm-tblgen --parallel 3
+          test -x "$LLVM_HOST/bin/llvm-tblgen"
+
+          cmake -S "$LLVM_ROOT/llvm" -B "$LLVM_IOS" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=16.5 \
+            -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
+            -DLLVM_TABLEGEN="$LLVM_HOST/bin/llvm-tblgen" \
+            -DLLVM_TARGETS_TO_BUILD="" \
+            -DLLVM_ENABLE_PROJECTS="" \
+            -DLLVM_BUILD_UTILS=OFF \
+            -DLLVM_BUILD_TOOLS=OFF \
+            -DLLVM_INCLUDE_TOOLS=OFF \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_INCLUDE_DOCS=OFF \
+            -DLLVM_ENABLE_TERMINFO=OFF \
+            -DLLVM_ENABLE_ZLIB=OFF \
+            -DLLVM_ENABLE_ZSTD=OFF \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DLLVM_BUILD_LLVM_DYLIB=OFF \
+            -DLLVM_LINK_LLVM_DYLIB=OFF
+          cmake --build "$LLVM_IOS" --parallel 3
+          test -d "$LLVM_IOS/lib"
+          echo "LLVM iOS static archives: $(find "$LLVM_IOS/lib" -maxdepth 1 -name '*.a' | wc -l | tr -d ' ')"
+
+      - name: Build DXMT unix side for iOS 16.5
+        run: |
+          set -euxo pipefail
+          rm -rf build/dxmt-ios/obj
+          bash build/dxmt-ios/build.sh
+          test -f build/dxmt-ios/libdxmt_unix.a
+
+          xcrun -sdk iphoneos libtool -static \
+            -o build/dxmt-ios/libdxmt_combined.a \
+            build/dxmt-ios/obj/*.o \
+            toolchains/llvm-ios-build/lib/*.a
+
+          cp build/dxmt-ios/libdxmt_combined.a app/Madeira/libdxmt_combined.a
+          test -f app/Madeira/libdxmt_combined.a
+          ls -lh app/Madeira/libdxmt_combined.a
+
       - name: Inventory remaining native app libraries
         run: |
           set -euxo pipefail
