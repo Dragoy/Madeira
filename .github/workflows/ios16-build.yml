@@ -14,7 +14,15 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
+      - name: Restore Microsoft VC++ runtime cache
+        id: cache-vcruntime
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/x86_64-vcruntime
+          key: madeira-vcruntime-x64-v1
+
       - name: Download and install official Microsoft VC++ x64 runtime
+        if: steps.cache-vcruntime.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -61,6 +69,13 @@ jobs:
           if ((Get-ChildItem $dest -Filter *.dll).Count -ne 12) {
             throw "Expected exactly 12 runtime DLLs"
           }
+
+      - name: Save Microsoft VC++ runtime cache
+        if: steps.cache-vcruntime.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/x86_64-vcruntime
+          key: madeira-vcruntime-x64-v1
 
       - name: Upload VC++ runtime
         uses: actions/upload-artifact@v4
@@ -178,14 +193,20 @@ jobs:
             include/oaidl.h \
             include/propidl.h \
             include/oleidl.h \
+            include/ocidl.h \
             include/dxgiformat.h \
+            include/dxgitype.h \
+            include/dxgi.h \
+            include/d3dcommon.h \
+            include/d3d10.h \
+            include/d3d10_1.h \
             include/dcommon.h \
             include/d2d1.h \
             include/dwrite.h \
             include/dwrite_1.h \
             include/dwrite_2.h \
             include/dwrite_3.h
-          for h in wtypesbase.h wtypes.h unknwn.h objidlbase.h objidl.h oaidl.h propidl.h oleidl.h dxgiformat.h dcommon.h d2d1.h dwrite.h dwrite_1.h dwrite_2.h dwrite_3.h; do
+          for h in wtypesbase.h wtypes.h unknwn.h objidlbase.h objidl.h oaidl.h propidl.h oleidl.h ocidl.h dxgiformat.h dxgitype.h dxgi.h d3dcommon.h d3d10.h d3d10_1.h dcommon.h d2d1.h dwrite.h dwrite_1.h dwrite_2.h dwrite_3.h; do
             test -f "wine/build-macos/include/$h"
           done
 
