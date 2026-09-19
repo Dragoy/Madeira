@@ -21,7 +21,7 @@ compile_one() {
     echo -n "  $name... "
 
     if xcrun -sdk iphoneos clang \
-        -arch arm64 -isysroot "$SDK" -miphoneos-version-min=17.0 \
+        -arch arm64 -isysroot "$SDK" -miphoneos-version-min=16.5 \
         -O2 -fPIC -fvisibility=hidden -fno-stack-protector -fno-strict-aliasing \
         -Wno-implicit-function-declaration -Wno-int-conversion \
         -include "$WINE_BUILD/include/config.h" \
@@ -41,6 +41,7 @@ compile_one() {
         SUCCEEDED=$((SUCCEEDED + 1))
     else
         echo "FAILED"
+        cat "$OBJ_DIR/$name.err" || true
         FAILED=$((FAILED + 1))
         FAILED_FILES="$FAILED_FILES $name"
     fi
@@ -59,7 +60,7 @@ compile_unixlib() {
     shift 3
     echo -n "  $name... "
     if xcrun -sdk iphoneos clang \
-        -arch arm64 -isysroot "$SDK" -miphoneos-version-min=17.0 \
+        -arch arm64 -isysroot "$SDK" -miphoneos-version-min=16.5 \
         -O2 -fPIC -fvisibility=hidden -fno-stack-protector -fno-strict-aliasing \
         -Wno-implicit-function-declaration -Wno-int-conversion \
         -include "$WINE_BUILD/include/config.h" \
@@ -76,6 +77,7 @@ compile_unixlib() {
         SUCCEEDED=$((SUCCEEDED + 1))
     else
         echo "FAILED"
+        cat "$OBJ_DIR/$name.err" || true
         FAILED=$((FAILED + 1))
         FAILED_FILES="$FAILED_FILES $name"
     fi
@@ -96,9 +98,11 @@ compile_unixlib "$WINE_SRC/dlls/ws2_32/unixlib.c" "ws2_32_unixlib" "ws2_32" \
     -I"$WINE_SRC/dlls/ws2_32"
 compile_unixlib "$WINE_SRC/dlls/bcrypt/gnutls.c" "bcrypt_unixlib" "bcrypt" \
     -I"$WINE_SRC/dlls/bcrypt" -I"$GNUTLS_PREFIX/include" \
+    -DHAVE_GNUTLS_CIPHER_INIT=1 -DSONAME_LIBGNUTLS=\"libgnutls.a\" \
     -include "$CRYPTO_DIR/ios_gnutls_shim.h"
 compile_unixlib "$WINE_SRC/dlls/secur32/schannel_gnutls.c" "secur32_unixlib" "secur32" \
     -I"$WINE_SRC/dlls/secur32" -I"$GNUTLS_PREFIX/include" \
+    -DSONAME_LIBGNUTLS=\"libgnutls.a\" \
     -include "$CRYPTO_DIR/ios_gnutls_shim.h"
 # iOS-Madeira ml494 (#61 text wall): dwrite had NO unixlib, so every
 # __wine_unix_call from dwrite.dll failed and get_glyph_bbox never ran —
@@ -108,9 +112,10 @@ compile_unixlib "$WINE_SRC/dlls/secur32/schannel_gnutls.c" "secur32_unixlib" "se
 # build tree, so that include dir is named explicitly here.
 compile_unixlib "$BUILD_DIR/dwrite_freetype_ios.c" "dwrite_unixlib" "dwrite" \
     -I"$WINE_SRC/dlls/dwrite" -I"$REPO_ROOT/research/freetype/include" \
-    -I"$REPO_ROOT/wine/build-arm64ec/include"
+    -I"$WINE_BUILD/include"
 compile_unixlib "$CRYPTO_DIR/crypt32_unixlib_ios.c" "crypt32_unixlib" "crypt32" \
     -I"$WINE_SRC/dlls/crypt32" -I"$GNUTLS_PREFIX/include" \
+    -DSONAME_LIBGNUTLS=\"libgnutls.a\" \
     -include "$CRYPTO_DIR/ios_gnutls_shim.h"
 # iOS-Madeira 2026-08-03 (#79 transport): in-process NSI TCP connection
 # tables (nsiproxy.sys is not shipped; PE nsi.dll falls back to this).

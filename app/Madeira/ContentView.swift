@@ -686,7 +686,7 @@ struct JoystickKeyView: View {
                             hosted = true
                         }
                     }
-                    .onChange(of: geo.frame(in: .global)) { _, f in
+                    .onChange(of: geo.frame(in: .global)) { f in
                         center = CGPoint(x: f.midX, y: f.midY)
                         JoystickPadState.shared.center = center
                     }
@@ -848,7 +848,7 @@ struct ContentView: View {
     @StateObject private var logStore = LogStore.shared
     @State private var jitStatus: JITStatus = .unknown
     @State private var entitlements: EntitlementStatus?
-    @State private var debuggerAttached = isDebuggerAttached()
+    @State private var jitEnabled = jit_check_debugged()
     @ObservedObject private var input = InputSettings.shared
     @State private var pointerPanel = false
     @Namespace private var pointerNS
@@ -1080,7 +1080,7 @@ struct ContentView: View {
         HStack(spacing: 8) {
             // Live debugger/JIT state, not the (macOS-only, never granted on
             // iOS) allow-jit entitlement the old badge checked.
-            entitlementBadge("JIT", granted: debuggerAttached)
+            entitlementBadge("JIT", granted: jitEnabled)
             entitlementBadge("Memory+", granted: ents.increasedMemory)
             entitlementBadge("64-bit VA", granted: ents.extendedVA)
             Spacer()
@@ -1099,7 +1099,7 @@ struct ContentView: View {
         .padding(.top, 4)
         .padding(.bottom, 8)
         .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in
-            debuggerAttached = isDebuggerAttached()
+            jitEnabled = jit_check_debugged()
         }
     }
 
@@ -1720,12 +1720,12 @@ struct ContentView: View {
 
     private func enableJITViaStikDebug() {
         jitStatus = .testing
-        logStore.log("Requesting JIT via StikDebug URL scheme...")
+        logStore.log("Requesting JIT...")
 
         StikJITHelper.enableJIT { success in
             if success {
                 jitStatus = .available
-                logStore.log("JIT enabled! Debugger attached.", level: .success)
+                logStore.log("JIT enabled! (CS_DEBUGGED set)", level: .success)
             } else {
                 jitStatus = .unavailable
                 logStore.log("Failed to enable JIT via StikDebug", level: .error)

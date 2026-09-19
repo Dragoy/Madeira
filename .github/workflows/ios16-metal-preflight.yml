@@ -1,0 +1,52 @@
+name: Madeira Metal iOS preflight
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/ios16-metal-preflight.yml
+      - build/dxmt-ios/**
+permissions:
+  contents: read
+concurrency:
+  group: madeira-metal-preflight-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  metal:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Fetch pinned DXMT sources
+        run: |
+          git submodule update --init --depth 1 research/dxmt
+          git -C research/dxmt submodule update --init --depth 1 include/native/directx
+          sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
+      - name: Check Metal and Objective-C compilation
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p ci-logs build/dxmt-ios/probe
+          failed=0
+          bash build/dxmt-ios/prepare-shaders.sh >ci-logs/shader-build.log 2>&1 || failed=1
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          for name in winemetal_unix cache; do
+            xcrun --sdk iphoneos clang -arch arm64 -isysroot "$SDK" -miphoneos-version-min=16.5 -fblocks -O2 -x objective-c \
+              -Iresearch/dxmt/include -Iresearch/dxmt/libs -Iresearch/dxmt/src/winemetal -Iresearch/dxmt/src/airconv \
+              -c "research/dxmt/src/winemetal/unix/$name.c" -o "build/dxmt-ios/probe/$name.o" \
+              >"ci-logs/$name.log" 2>&1 || failed=1
+          done
+          for log in ci-logs/*.log; do echo "=== $log ==="; cat "$log"; done
+          exit "$failed"
+      - name: Upload Metal evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: madeira-metal-preflight
+          path: |
+            ci-logs
+            build/dxmt-ios/shader-headers
+          if-no-files-found: error

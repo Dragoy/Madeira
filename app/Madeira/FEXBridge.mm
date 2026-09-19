@@ -115,62 +115,66 @@ static bool jit_pool_init(void) {
     if (g_jit_rx_base) return true; // Already initialized
 
     if (!jit_check_debugged()) {
-        fex_log("Cannot init JIT pool: debugger not attached");
+        fex_log("Cannot init JIT pool: CS_DEBUGGED not set");
         return false;
     }
 
     size_t size = JIT_POOL_SIZE;
-    mach_port_t task = mach_task_self();
+    void *rx_ptr = nullptr;
+    void *rw_ptr = nullptr;
 
-    // Step 1: Ask debugger to allocate RX pages
-    fex_log("Requesting debugger to allocate %zu bytes of RX memory...", size);
-    void *rx_ptr = jit26_prepare_region(NULL, size);
-    if (!rx_ptr) {
-        fex_log("FAIL: Debugger RX allocation returned NULL");
-        return false;
-    }
-    fex_log("Debugger allocated RX at %p", rx_ptr);
+    if (!jit_is_traced()) {
+        // TrollStore sets CS_DEBUGGED and detaches immediately. BRK #0xf00d is
+        // a StikDebug protocol, not a generic JIT syscall, so use the same
+        // direct dual-map allocator as the production Wine pool.
+        fex_log("TrollStore JIT detected; allocating BRK-free direct FEX pool...");
+        if (!jit_direct_pool_create(size, &rx_ptr, &rw_ptr)) {
+            fex_log("FAIL: direct TrollStore FEX pool allocation failed");
+            return false;
+        }
+    } else {
+        mach_port_t task = mach_task_self();
 
-    // Step 2: vm_remap to create RW view of the same pages
-    vm_address_t rw_addr = 0;
-    vm_prot_t cur_prot = 0, max_prot = 0;
-    kern_return_t kr = vm_remap(
-        task, &rw_addr, size, 0,
-        VM_FLAGS_ANYWHERE, task,
-        (vm_address_t)rx_ptr, FALSE,
-        &cur_prot, &max_prot, VM_INHERIT_NONE
-    );
-    if (kr != KERN_SUCCESS) {
-        fex_log("FAIL: vm_remap for RW mirror: %s (kr=%d)", mach_error_string(kr), kr);
-        return false;
-    }
+        // StikDebug path: ask the live debugger to allocate blessed RX pages.
+        fex_log("Live debugger detected; requesting %zu bytes of RX memory...", size);
+        rx_ptr = jit26_prepare_region(NULL, size);
+        if (!rx_ptr) {
+            fex_log("FAIL: Debugger RX allocation returned NULL");
+            return false;
+        }
 
-    // Step 3: Set the remapped view to RW
-    kr = vm_protect(task, rw_addr, size, FALSE, VM_PROT_READ | VM_PROT_WRITE);
-    if (kr != KERN_SUCCESS) {
-        fex_log("FAIL: vm_protect(RW): %s (kr=%d)", mach_error_string(kr), kr);
-        vm_deallocate(task, rw_addr, size);
-        return false;
+        vm_address_t rw_addr = 0;
+        vm_prot_t cur_prot = 0, max_prot = 0;
+        kern_return_t kr = vm_remap(
+            task, &rw_addr, size, 0,
+            VM_FLAGS_ANYWHERE, task,
+            (vm_address_t)rx_ptr, FALSE,
+            &cur_prot, &max_prot, VM_INHERIT_NONE
+        );
+        if (kr != KERN_SUCCESS) {
+            fex_log("FAIL: vm_remap for RW mirror: %s (kr=%d)", mach_error_string(kr), kr);
+            return false;
+        }
+
+        kr = vm_protect(task, rw_addr, size, FALSE, VM_PROT_READ | VM_PROT_WRITE);
+        if (kr != KERN_SUCCESS) {
+            fex_log("FAIL: vm_protect(RW): %s (kr=%d)", mach_error_string(kr), kr);
+            vm_deallocate(task, rw_addr, size);
+            return false;
+        }
+        rw_ptr = reinterpret_cast<void*>(rw_addr);
     }
 
     g_jit_rx_base = rx_ptr;
-    g_jit_rw_base = reinterpret_cast<void*>(rw_addr);
+    g_jit_rw_base = rw_ptr;
     g_jit_pool_size = size;
 
     int64_t write_offset = reinterpret_cast<intptr_t>(g_jit_rw_base) - reinterpret_cast<intptr_t>(g_jit_rx_base);
     FEXCore::DualMap::WriteOffset = write_offset;
 
-    /* NOTE: the setenv that publishes this offset to xtajit64.dll lives in
-     * WineProcessBridge.m, right next to the SteamAppPath setenv — that is
-     * the point where Wine snapshots the environment, so it forwards
-     * reliably. Setting it here (jit_pool_init) is too early/wrong-timed
-     * and did not reach Wine's GetEnvironmentVariableW. See
-     * fex_get_jit_write_offset(). */
-
     fex_log("JIT pool initialized: RX=%p, RW=%p, size=%zu, WriteOffset=%lld",
             g_jit_rx_base, g_jit_rw_base, g_jit_pool_size, (long long)write_offset);
 
-    // Quick coherence test
     uint32_t test_val = 0xCAFEBABE;
     memcpy(g_jit_rw_base, &test_val, sizeof(test_val));
     uint32_t readback = *static_cast<uint32_t*>(g_jit_rx_base);

@@ -21,48 +21,61 @@ enum StikJITHelper {
         return scriptBase64
     }
 
-    /// Check if StikDebug or StikJIT is available by trying to open their URL.
+    /// iOS 16/17.0 uses TrollStore's own JIT launcher. StikJIT/StikDebug
+    /// only supports iOS 17.4+, so never route older systems through it.
     static var isAvailable: Bool {
-        guard let url = URL(string: "stikjit://enable-jit") else { return false }
+        let scheme: String
+        if #available(iOS 17.4, *) {
+            scheme = "stikjit://enable-jit"
+        } else {
+            scheme = "apple-magnifier://enable-jit"
+        }
+        guard let url = URL(string: scheme) else { return false }
         return UIApplication.shared.canOpenURL(url)
     }
 
-    /// Open StikDebug with our JIT script embedded in the URL.
-    /// StikDebug will attach to our process and run the script.
     static func enableJIT(completion: @escaping (Bool) -> Void) {
-        let bundleId = Bundle.main.bundleIdentifier ?? "com.madeira.emulator"
+        let bundleId = Bundle.main.bundleIdentifier ?? "com.willfaust.mythicemu"
+        let urlString: String
 
-        // Build the URL with script data
-        let scriptData = resolvedScriptBase64.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-        let urlString = "stikjit://enable-jit?bundle-id=\(bundleId)&script-data=\(scriptData)"
+        if #available(iOS 17.4, *) {
+            let scriptData = resolvedScriptBase64.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+            urlString = "stikjit://enable-jit?bundle-id=\(bundleId)&script-data=\(scriptData)"
+            LogStore.shared.log("Opening StikDebug to enable JIT...")
+        } else {
+            urlString = "apple-magnifier://enable-jit?bundle-id=\(bundleId)"
+            LogStore.shared.log("Opening TrollStore to launch Madeira with JIT...")
+        }
 
         guard let url = URL(string: urlString) else {
-            LogStore.shared.log("Failed to build StikJIT URL", level: .error)
+            LogStore.shared.log("Failed to build JIT URL", level: .error)
             completion(false)
             return
         }
 
-        LogStore.shared.log("Opening StikDebug to enable JIT...")
-
         UIApplication.shared.open(url, options: [:]) { success in
             if !success {
-                LogStore.shared.log("Failed to open StikDebug. Is it installed?", level: .error)
+                LogStore.shared.log("Failed to open JIT provider", level: .error)
                 completion(false)
                 return
             }
-
-            // Poll for CS_DEBUGGED flag
             pollForJIT(completion: completion)
         }
     }
 
-    /// Poll every 0.5s until CS_DEBUGGED is set, then call completion.
+    /// Poll for CS_DEBUGGED, but fail cleanly instead of leaving an immortal timer.
     private static func pollForJIT(completion: @escaping (Bool) -> Void) {
+        var attempts = 0
         Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { timer in
+            attempts += 1
             if jit_check_debugged() {
                 timer.invalidate()
                 LogStore.shared.log("JIT enabled! (CS_DEBUGGED set)", level: .success)
                 completion(true)
+            } else if attempts >= 60 {
+                timer.invalidate()
+                LogStore.shared.log("Timed out waiting for JIT", level: .error)
+                completion(false)
             }
         }
     }
@@ -80,7 +93,23 @@ enum StikJITHelper {
     /// Allocate a JIT memory pool via BRK #0xf00d WITHOUT detaching the debugger.
     /// The debugger stays attached so Wine can use BRK to prepare PE code pages.
     static func allocatePool(poolSize: Int = 128 * 1024 * 1024) -> (rx: UnsafeMutableRawPointer, rw: UnsafeMutableRawPointer, size: Int)? {
-        LogStore.shared.log("Allocating \(poolSize / 1024 / 1024)MB JIT pool via debugger...")
+        // TrollStore's Open with JIT sets CS_DEBUGGED and immediately detaches.
+        // In that state P_TRACED is false, so BRK #0xf00d would be an
+        // unhandled SIGTRAP. Use Madeira's own dual-map allocator instead.
+        if !isDebuggerAttached() {
+            LogStore.shared.log("Allocating \(poolSize / 1024 / 1024)MB JIT pool via TrollStore direct dual-map...")
+            var rx: UnsafeMutableRawPointer?
+            var rw: UnsafeMutableRawPointer?
+            guard jit_direct_pool_create(poolSize, &rx, &rw),
+                  let rx, let rw else {
+                LogStore.shared.log("TrollStore direct JIT pool allocation failed", level: .error)
+                return nil
+            }
+            LogStore.shared.log("TrollStore JIT pool ready: RX=\(String(format: "%p", Int(bitPattern: rx))) RW=\(String(format: "%p", Int(bitPattern: rw)))", level: .success)
+            return (rx: rx, rw: rw, size: poolSize)
+        }
+
+        LogStore.shared.log("Allocating \(poolSize / 1024 / 1024)MB JIT pool via attached StikDebug...")
 
         // iOS-Madeira: FEX's dispatcher emit has a position-dependent encoding
         // bug — only works when the JIT pool lands at a high enough address
@@ -305,7 +334,15 @@ enum StikJITHelper {
 
     /// Detach the debugger. Call this after Wine is done loading PE DLLs.
     static func detachDebugger() {
-        LogStore.shared.log("Detaching debugger...")
+        // TrollStore already detached after setting CS_DEBUGGED. Never execute
+        // the StikDebug BRK protocol when P_TRACED is false.
+        guard isDebuggerAttached() else {
+            setenv("MADEIRA_DETACHED", "1", 1)
+            LogStore.shared.log("TrollStore JIT: debugger already detached; no BRK detach needed.", level: .success)
+            return
+        }
+
+        LogStore.shared.log("Detaching StikDebug...")
         jit26_detach()
         // task #34: signal in-process waiters (share-probe poller). CS_DEBUGGED
         // is sticky post-detach, so an env flag is the reliable signal.
