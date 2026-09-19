@@ -183,7 +183,9 @@ jobs:
       - name: Generate Wine IDL headers
         run: |
           set -euxo pipefail
+          brew list bison >/dev/null 2>&1 || brew install bison
           export PATH="$GITHUB_WORKSPACE/toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin:/opt/homebrew/opt/bison/bin:$PATH"
+          bison --version | head -1
           make -C wine/build-macos -j3 \
             include/wtypesbase.h \
             include/wtypes.h \
