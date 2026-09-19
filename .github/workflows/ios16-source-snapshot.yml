@@ -1,0 +1,31 @@
+name: Madeira source diagnostics
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/ios16-source-snapshot.yml']
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Fetch pinned native source submodules
+        run: |
+          git submodule update --init --depth 1 FEX wine research/dxmt
+          git -C research/dxmt submodule update --init --depth 1 include/native/directx
+      - name: Archive source only, without credentials or binaries
+        run: |
+          tar --exclude='.git' --exclude='*/tests/*' --exclude='*.dll' --exclude='*.exe' --exclude='*.a' --exclude='*.tar.*' --exclude='*.ttf' --exclude='*.otf' --exclude='*.woff*' -czf "$RUNNER_TEMP/madeira-source.tar.gz" .github build tools app wine research/dxmt FEX
+          sha256sum "$RUNNER_TEMP/madeira-source.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: madeira-source-diagnostics
+          path: ${{ runner.temp }}/madeira-source.tar.gz
+          retention-days: 3
+          if-no-files-found: error
