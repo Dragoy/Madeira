@@ -22,7 +22,7 @@ checks = {
     "iOS abort_process logs the NTSTATUS to unified logging":
         "abort_process intercepted" in ios_part and "os_log_error" in ios_part,
     "iOS abort_process never calls real _exit":
-        "_exit(" not in ios_part,
+        re.search(r"(?m)^\\s*_exit\\s*\\(", ios_part) is None,
     "non-iOS upstream _exit behavior remains":
         "#else" in body and "_exit( get_unix_exit_code( status ));" in body,
 }
