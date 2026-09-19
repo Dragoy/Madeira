@@ -386,11 +386,13 @@ static void sigtrap_handler(int sig, siginfo_t *info, void *context) {
 }
 
 void jit_install_trap_handler(void) {
-    // Only install if no debugger is attached.
-    // When StikDebug is attached, it handles BRK/SIGTRAP directly.
-    // Our handler would steal signals from the debugger and break the protocol.
-    if (jit_check_debugged()) {
-        jit_log("Debugger attached — skipping SIGTRAP handler (debugger handles BRK)");
+    // CS_DEBUGGED is sticky after TrollStore's attach+detach and therefore does
+    // NOT mean a debugger is still present. Only P_TRACED tells us whether a
+    // live debugger can intercept the StikDebug BRK protocol. When TrollStore
+    // has already detached, keep our SIGTRAP fallback installed so an accidental
+    // BRK fails closed instead of terminating the process with SIGTRAP.
+    if (jit_is_traced()) {
+        jit_log("Live debugger attached — skipping SIGTRAP handler (debugger handles BRK)");
         return;
     }
     struct sigaction sa;
