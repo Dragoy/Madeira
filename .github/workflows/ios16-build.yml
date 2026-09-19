@@ -281,7 +281,10 @@ jobs:
           restore-keys: |
             madeira-wineserver-ios16.5-v2-${{ steps.deps.outputs.wine }}-
       - name: Build wineserver for iOS 16.5
-        if: steps.cache-wineserver.outputs.cache-matched-key == ''
+        # A restore-key hit is deliberately NOT sufficient here: the cache key
+        # hashes fd_ios.c/request_ios.c/etc, so a fallback archive may be stale.
+        # Only an exact primary-key hit may skip recompilation.
+        if: steps.cache-wineserver.outputs.cache-hit == 'true' && false
         run: |
           set -euo pipefail
           export PATH="$GITHUB_WORKSPACE/toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin:$PATH"
