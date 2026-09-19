@@ -204,6 +204,7 @@ jobs:
             include/msxml.h \
             include/urlmon.h \
             include/dxgiformat.h \
+            include/dxgicommon.h \
             include/dxgitype.h \
             include/dxgi.h \
             include/d3dcommon.h \
@@ -215,7 +216,7 @@ jobs:
             include/dwrite_1.h \
             include/dwrite_2.h \
             include/dwrite_3.h
-          for h in wtypesbase.h wtypes.h unknwn.h objidlbase.h objidl.h oaidl.h propidl.h oleidl.h ocidl.h servprov.h msxml.h urlmon.h dxgiformat.h dxgitype.h dxgi.h d3dcommon.h d3d10.h d3d10_1.h dcommon.h d2d1.h dwrite.h dwrite_1.h dwrite_2.h dwrite_3.h; do
+          for h in wtypesbase.h wtypes.h unknwn.h objidlbase.h objidl.h oaidl.h propidl.h oleidl.h ocidl.h servprov.h msxml.h urlmon.h dxgiformat.h dxgicommon.h dxgitype.h dxgi.h d3dcommon.h d3d10.h d3d10_1.h dcommon.h d2d1.h dwrite.h dwrite_1.h dwrite_2.h dwrite_3.h; do
             test -f "wine/build-macos/include/$h"
           done
 
