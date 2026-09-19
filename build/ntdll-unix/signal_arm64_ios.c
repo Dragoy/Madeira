@@ -8903,6 +8903,89 @@ static void ill_handler( int signal, siginfo_t *siginfo, void *sigcontext )
                         (unsigned long long)rec[4], (unsigned long long)rec[5]);
             }
         }
+        /* iOS 16 / TrollStore DX11 diagnostic.
+         *
+         * The clock test executes successfully while DX11 can enter SIGILL with
+         * PC inside the RX pool.  Classify the *PC* (not merely si_addr): the
+         * Mach exception can report a truncated/derived data address, which
+         * previously made the pool ledger miss the interesting mapping.
+         *
+         * Compare three views of the same RVA:
+         *   RX  - bytes actually executed
+         *   RW  - writable alias of the same JIT object
+         *   PE  - original image mapping via reverse translation
+         *
+         * RX != RW => broken dual mapping/backing.
+         * RX == RW != PE => pool copy/relocation/patching changed the bytes.
+         * RX == RW == PE but !text => control flow jumped into data/table.
+         * This block is diagnostic only and never mutates execution state. */
+        {
+            static volatile int dx11_ill_diag_count = 0;
+            int dn = __sync_fetch_and_add(&dx11_ill_diag_count, 1);
+            if (dn < 8)
+            {
+                extern void *ios_jit_rx_base_global;
+                extern void *ios_jit_rw_base_global;
+                extern size_t ios_jit_pool_size_global;
+                extern int ios_jit_addr_is_text(uintptr_t addr);
+                extern void *ios_jit_reverse_translate_addr(const void *addr);
+                extern void *ios_jit_pool_copy_owner(const void *addr, void **pe_base_out);
+                extern void ios_jit_describe_pool_addr(const void *addr, char *buf, size_t buflen);
+
+                uintptr_t pcv = (uintptr_t)PC_sig(context);
+                uintptr_t rxb = (uintptr_t)ios_jit_rx_base_global;
+                uintptr_t rwb = (uintptr_t)ios_jit_rw_base_global;
+                size_t psz = ios_jit_pool_size_global;
+                int in_rx = rxb && pcv >= rxb && pcv < rxb + psz;
+                uintptr_t off = in_rx ? pcv - rxb : 0;
+                uintptr_t rwpc = (in_rx && rwb) ? rwb + off : 0;
+                void *pe_base = NULL;
+                void *owner = ios_jit_pool_copy_owner((void *)pcv, &pe_base);
+                void *pe_pc = ios_jit_reverse_translate_addr((void *)pcv);
+                char desc[256] = {0};
+                uint32_t rxw[8] = {0}, rww[8] = {0}, pew[8] = {0};
+                mach_vm_size_t grx = 0, grw = 0, gpe = 0;
+
+                ios_jit_describe_pool_addr((void *)pcv, desc, sizeof(desc));
+                if (pcv)
+                    (void)mach_vm_read_overwrite(mach_task_self(), (mach_vm_address_t)pcv,
+                            sizeof(rxw), (mach_vm_address_t)(uintptr_t)rxw, &grx);
+                if (rwpc)
+                    (void)mach_vm_read_overwrite(mach_task_self(), (mach_vm_address_t)rwpc,
+                            sizeof(rww), (mach_vm_address_t)(uintptr_t)rww, &grw);
+                if (pe_pc && pe_pc != (void *)pcv)
+                    (void)mach_vm_read_overwrite(mach_task_self(), (mach_vm_address_t)(uintptr_t)pe_pc,
+                            sizeof(pew), (mach_vm_address_t)(uintptr_t)pew, &gpe);
+
+                dprintf(STDERR_FILENO,
+                    "[dx11-ill] #%d pc=0x%llx si_addr=%p low32=0x%x low32==si=%d "
+                    "poolRX=%p poolRW=%p poolsz=0x%lx off=0x%llx in_rx=%d text=%d\n",
+                    dn + 1, (unsigned long long)pcv, siginfo ? siginfo->si_addr : NULL,
+                    (unsigned)(uint32_t)pcv,
+                    siginfo && (uintptr_t)siginfo->si_addr == (uintptr_t)(uint32_t)pcv,
+                    (void *)rxb, (void *)rwb, (unsigned long)psz,
+                    (unsigned long long)off, in_rx,
+                    in_rx ? ios_jit_addr_is_text(pcv) : 0);
+                dprintf(STDERR_FILENO,
+                    "[dx11-ill] map=%s owner=%p pe_base=%p pe_pc=%p rw_pc=%p rev=ios16dx11diag1\n",
+                    desc, owner, pe_base, pe_pc, (void *)rwpc);
+                dprintf(STDERR_FILENO,
+                    "[dx11-ill] RX got=%llu: %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                    (unsigned long long)grx,
+                    rxw[0],rxw[1],rxw[2],rxw[3],rxw[4],rxw[5],rxw[6],rxw[7]);
+                dprintf(STDERR_FILENO,
+                    "[dx11-ill] RW got=%llu: %08x %08x %08x %08x %08x %08x %08x %08x  equalRX=%d\n",
+                    (unsigned long long)grw,
+                    rww[0],rww[1],rww[2],rww[3],rww[4],rww[5],rww[6],rww[7],
+                    grx == sizeof(rxw) && grw == sizeof(rww) && !memcmp(rxw,rww,sizeof(rxw)));
+                dprintf(STDERR_FILENO,
+                    "[dx11-ill] PE got=%llu: %08x %08x %08x %08x %08x %08x %08x %08x  equalRX=%d\n",
+                    (unsigned long long)gpe,
+                    pew[0],pew[1],pew[2],pew[3],pew[4],pew[5],pew[6],pew[7],
+                    grx == sizeof(rxw) && gpe == sizeof(pew) && !memcmp(rxw,pew,sizeof(rxw)));
+            }
+        }
+
         /* iOS-Madeira: also dump JIT pool here (the Mach UNHANDLED path may not
          * fire for ILL since we deliver via setup_exception). One-shot. */
         {
