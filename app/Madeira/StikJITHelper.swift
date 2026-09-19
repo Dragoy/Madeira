@@ -93,7 +93,23 @@ enum StikJITHelper {
     /// Allocate a JIT memory pool via BRK #0xf00d WITHOUT detaching the debugger.
     /// The debugger stays attached so Wine can use BRK to prepare PE code pages.
     static func allocatePool(poolSize: Int = 128 * 1024 * 1024) -> (rx: UnsafeMutableRawPointer, rw: UnsafeMutableRawPointer, size: Int)? {
-        LogStore.shared.log("Allocating \(poolSize / 1024 / 1024)MB JIT pool via debugger...")
+        // TrollStore's Open with JIT sets CS_DEBUGGED and immediately detaches.
+        // In that state P_TRACED is false, so BRK #0xf00d would be an
+        // unhandled SIGTRAP. Use Madeira's own dual-map allocator instead.
+        if !isDebuggerAttached() {
+            LogStore.shared.log("Allocating \(poolSize / 1024 / 1024)MB JIT pool via TrollStore direct dual-map...")
+            var rx: UnsafeMutableRawPointer?
+            var rw: UnsafeMutableRawPointer?
+            guard jit_direct_pool_create(poolSize, &rx, &rw),
+                  let rx, let rw else {
+                LogStore.shared.log("TrollStore direct JIT pool allocation failed", level: .error)
+                return nil
+            }
+            LogStore.shared.log("TrollStore JIT pool ready: RX=\(String(format: "%p", Int(bitPattern: rx))) RW=\(String(format: "%p", Int(bitPattern: rw)))", level: .success)
+            return (rx: rx, rw: rw, size: poolSize)
+        }
+
+        LogStore.shared.log("Allocating \(poolSize / 1024 / 1024)MB JIT pool via attached StikDebug...")
 
         // iOS-Madeira: FEX's dispatcher emit has a position-dependent encoding
         // bug — only works when the JIT pool lands at a high enough address
@@ -318,7 +334,15 @@ enum StikJITHelper {
 
     /// Detach the debugger. Call this after Wine is done loading PE DLLs.
     static func detachDebugger() {
-        LogStore.shared.log("Detaching debugger...")
+        // TrollStore already detached after setting CS_DEBUGGED. Never execute
+        // the StikDebug BRK protocol when P_TRACED is false.
+        guard isDebuggerAttached() else {
+            setenv("MADEIRA_DETACHED", "1", 1)
+            LogStore.shared.log("TrollStore JIT: debugger already detached; no BRK detach needed.", level: .success)
+            return
+        }
+
+        LogStore.shared.log("Detaching StikDebug...")
         jit26_detach()
         // task #34: signal in-process waiters (share-probe poller). CS_DEBUGGED
         // is sticky post-detach, so an env flag is the reliable signal.
