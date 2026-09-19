@@ -284,7 +284,7 @@ jobs:
         # A restore-key hit is deliberately NOT sufficient here: the cache key
         # hashes fd_ios.c/request_ios.c/etc, so a fallback archive may be stale.
         # Only an exact primary-key hit may skip recompilation.
-        if: steps.cache-wineserver.outputs.cache-hit == 'true' && false
+        if: steps.cache-wineserver.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           export PATH="$GITHUB_WORKSPACE/toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin:$PATH"
