@@ -301,6 +301,8 @@ jobs:
         with:
           path: app/Madeira/libwineserver.a
           key: madeira-wineserver-ios16.5-v4-${{ steps.deps.outputs.wine }}-${{ hashFiles('build/wineserver/**/*.sh', 'build/wineserver/**/*.c', 'build/wineserver/**/*.h') }}
+      - name: Verify iOS guest process exit containment
+        run: python3 tools/ci/test_ios_process_exit.py
       - name: Restore ntdll iOS cache
         id: cache-ntdll
         uses: actions/cache/restore@v4
