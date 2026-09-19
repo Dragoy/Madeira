@@ -128,6 +128,11 @@ fi
 
 if [ $FAILED -gt 0 ]; then
     echo ""
+    echo "=== win32u compile diagnostics ==="
+    for name in $FAILED_FILES; do
+        echo "--- $name.err ---"
+        sed -n '1,120p' "$OBJ_DIR/$name.err" || true
+    done
     echo "(not linking — errors in $OBJ_DIR/<name>.err)"
     exit 1
 fi
