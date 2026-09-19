@@ -13236,9 +13236,34 @@ void *ios_virtual_setup_exception_for_thread( void *stack_ptr, size_t size, EXCE
 
     if (!is_inside_thread_stack_teb( stack, &stack_info, teb ))
     {
-        /* routine in this port — FEX guest stacks are not Wine views */
-        if (!ios_range_writable( stack - size, size )) return NULL;
-        return stack - size;
+        /* iOS-Madeira ml763: "outside the native TEB stack" is only safe when
+         * this is the ARM64EC emulator stack that belongs to the SAME TEB.
+         *
+         * The old ml262/ml378 rule accepted ANY writable address. During a
+         * repeated guest AV, each KiUserExceptionDispatcher frame moved the
+         * host SP downward until it ran off the 256KB CHPE emulator stack and
+         * into unrelated process memory. Run #88 proved the consequence:
+         * frames marched from 0x1553b... to 0x1552b..., then SwiftUI crashed
+         * releasing a bogus object at 0x1552a8000. In a one-Mach-process port,
+         * "writable" is not ownership.
+         *
+         * Permit the frame only if the entire [stack-size, stack) range stays
+         * inside ChpeV2CpuAreaInfo's EmulatorStackLimit..EmulatorStackBase.
+         * The caller treats NULL as terminal for this guest thread. */
+        CHPE_V2_CPU_AREA_INFO *cpu = teb ? teb->ChpeV2CpuAreaInfo : NULL;
+        char *frame = stack - size;
+        uintptr_t lo = cpu ? (uintptr_t)cpu->EmulatorStackLimit : 0;
+        uintptr_t hi = cpu ? (uintptr_t)cpu->EmulatorStackBase : 0;
+
+        if (!cpu || !lo || !hi || (uintptr_t)stack > hi || (uintptr_t)frame < lo)
+        {
+            dprintf( 2, "[exc-stack] ml763 REFUSE outside owned stacks: teb=%p "
+                        "sp=%p frame=%p emu=[%p..%p) size=0x%lx\n",
+                     teb, stack, frame, (void *)lo, (void *)hi, (unsigned long)size );
+            return NULL;
+        }
+        if (!ios_range_writable( frame, size )) return NULL;
+        return frame;
     }
 
     stack -= size;
