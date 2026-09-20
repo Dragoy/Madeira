@@ -6274,7 +6274,7 @@ static int ios_alias_excl_recover_expected( uint64_t fault_pc, uint32_t stxr,
     if (((ldxr >> 30) & 3) != size) return 0;
     ld_rn = (ldxr >> 5) & 31;
     ld_rt = ldxr & 31;
-    if (ld_rn != st_rn || ld_rt != st_rt || st_rt == 31) return 0;
+    if (ld_rn != st_rn || ld_rt != st_rt || st_rt >= 29) return 0;
 
     /* ADD/SUB (immediate), optionally setting flags. Fixed bits[28:24]=10001.
      * Require in-place RMW of the loaded register. */
