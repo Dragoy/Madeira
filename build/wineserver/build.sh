@@ -12,18 +12,8 @@ SHIMS_DIR="$REPO_ROOT/build/ntdll-unix/shims"
 OBJ_DIR="$BUILD_DIR/obj"
 mkdir -p "$OBJ_DIR"
 
-# Copy the base library if we don't have one yet
-if [ ! -f "$OBJ_DIR/libwineserver.a" ]; then
-    if [ -f "$APP_LIB" ]; then
-        cp "$APP_LIB" "$OBJ_DIR/libwineserver.a"
-    else
-        echo "ERROR: No base libwineserver.a found"
-        exit 1
-    fi
-fi
-
 CC_FLAGS=(
-    -arch arm64 -isysroot "$SDK" -miphoneos-version-min=17.0 -O2
+    -arch arm64 -isysroot "$SDK" -miphoneos-version-min=16.5 -O2
     -I"$WINE_SRC/include" -I"$WINE_SRC/include/wine"
     -I"$WINE_SRC/build-macos/include"
     -I"$BUILD_DIR" -I"$WINE_SRC/server"
@@ -56,6 +46,40 @@ compile_one() {
         return 1
     fi
 }
+
+# Build a clean base archive from the complete Wine server source set when
+# no prebuilt archive exists. Upstream Madeira historically kept this archive
+# as a local/generated artifact; CI must be able to reproduce it from source.
+if [ ! -f "$OBJ_DIR/libwineserver.a" ]; then
+    echo "=== Bootstrapping base libwineserver.a from Wine sources ==="
+    BASE_OBJ_DIR="$OBJ_DIR/base"
+    rm -rf "$BASE_OBJ_DIR"
+    mkdir -p "$BASE_OBJ_DIR"
+
+    SERVER_SOURCES=(
+        async atom change class clipboard completion console d3dkmt debugger
+        device directory event fd file handle hook inproc_sync mach mailslot
+        main mapping mutex named_pipe object process procfs ptrace queue region
+        registry request semaphore serial signal sock symlink thread timer token
+        trace unicode user window winstation
+    )
+
+    for name in "${SERVER_SOURCES[@]}"; do
+        echo -n "  base/$name... "
+        if xcrun -sdk iphoneos clang "${CC_FLAGS[@]}" \
+            -c "$WINE_SRC/server/$name.c" -o "$BASE_OBJ_DIR/$name.o" \
+            2>"$OBJ_DIR/err-base-$name.txt"; then
+            echo "OK"
+        else
+            echo "FAILED"
+            cat "$OBJ_DIR/err-base-$name.txt"
+            exit 1
+        fi
+    done
+
+    ar rcs "$OBJ_DIR/libwineserver.a" "$BASE_OBJ_DIR"/*.o
+    echo "  base archive: $(wc -c < "$OBJ_DIR/libwineserver.a" | tr -d ' ') bytes"
+fi
 
 # Patched files: name:source_file:replaces_in_archive
 PATCHED_FILES=(
@@ -97,7 +121,7 @@ PATCHED_FILES=(
 echo "=== Building kill wrapper (without kill macro) ==="
 echo -n "  wineserver_ios_kill... "
 # Compile WITHOUT -include wineserver_ios_kill.h to avoid recursive macro
-KILL_FLAGS=(-arch arm64 -isysroot "$SDK" -miphoneos-version-min=17.0 -O2
+KILL_FLAGS=(-arch arm64 -isysroot "$SDK" -miphoneos-version-min=16.5 -O2
     -I"$BUILD_DIR" -DWINE_IOS=1 -Wno-implicit-function-declaration)
 if xcrun -sdk iphoneos clang "${KILL_FLAGS[@]}" -c "$BUILD_DIR/wineserver_ios_kill.c" -o "$OBJ_DIR/wineserver_ios_kill.o" 2>"$OBJ_DIR/err-kill.txt"; then
     echo "OK"

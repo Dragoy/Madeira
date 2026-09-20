@@ -40,9 +40,19 @@
  * right after writing a request; the loop sleeps in semaphore_timedwait
  * and wakes instantly. Extra signals just cause cheap extra scans. */
 semaphore_t ios_srv_wake_sem = 0;
+/* Mach semaphores are counting. A raw semaphore_signal() per server call can
+ * accumulate hundreds of stale tokens while the server is runnable; once that
+ * happens semaphore_timedwait() returns immediately over and over and turns
+ * the fallback poll loop into a wakeup storm. Keep at most one outstanding
+ * wake token. The server clears this flag immediately after consuming a wake,
+ * before scanning request fds, so a request that races with the clear either
+ * participates in the current scan or queues exactly one wake for the next. */
+static int ios_srv_wake_pending = 0;
 void ios_wineserver_wake(void)
 {
-    if (ios_srv_wake_sem) semaphore_signal( ios_srv_wake_sem );
+    if (!ios_srv_wake_sem) return;
+    if (!__atomic_exchange_n( &ios_srv_wake_pending, 1, __ATOMIC_ACQ_REL ))
+        semaphore_signal( ios_srv_wake_sem );
 }
 
 /* __WINESRC__ must be defined via -D flag so unicode_fix.h can see it */
@@ -1248,9 +1258,12 @@ void main_loop(void)
 
         ws_log("[wineserver-fd] iOS poll loop: master_fd=%d nb_users=%d active=%d", pollfd[0].fd, nb_users, active_users);
         {
-            kern_return_t skr = semaphore_create( mach_task_self(), &ios_srv_wake_sem,
-                                                  SYNC_POLICY_FIFO, 0 );
-            ws_log("[wineserver-fd] request-wake semaphore: kr=%d sem=0x%x", skr, ios_srv_wake_sem);
+            kern_return_t skr;
+            __atomic_store_n( &ios_srv_wake_pending, 0, __ATOMIC_RELEASE );
+            skr = semaphore_create( mach_task_self(), &ios_srv_wake_sem,
+                                    SYNC_POLICY_FIFO, 0 );
+            ws_log("[wineserver-fd] request-wake semaphore: kr=%d sem=0x%x coalesced=1 fallback=10ms",
+                   skr, ios_srv_wake_sem);
             if (skr != KERN_SUCCESS) ios_srv_wake_sem = 0;
         }
         while (active_users)
@@ -1346,7 +1359,12 @@ void main_loop(void)
              * Thumper's 8 zero-timeout polls/frame each paid the old
              * pickup latency: the 55-vs-60 FPS gap. */
             {
-                unsigned long long sleep_ns = 1000000ull;
+                /* Requests wake this wait immediately. The periodic tick is only
+                 * a fallback for event sources that iOS poll/kqueue cannot wake for.
+                 * 1 ms alone produces ~1000 kernel wakeups/s while idle, far above
+                 * iOS' resource budget. 10 ms caps the fallback at 100 Hz while
+                 * get_next_timeout() below still shortens it for real Wine timers. */
+                unsigned long long sleep_ns = 10000000ull;
                 /* ml585: timer lateness = how long past a due timer's deadline
                  * we actually resumed. This is the number that matters for the
                  * 77s Steam stalls — a starved loop shows up here even when the
@@ -1391,15 +1409,29 @@ void main_loop(void)
                         wts.tv_sec = (unsigned int)(sleep_ns / 1000000000ull);
                         wts.tv_nsec = (int)(sleep_ns % 1000000000ull);
                         wkr = semaphore_timedwait( ios_srv_wake_sem, wts );
-                        if (wkr == KERN_OPERATION_TIMED_OUT) ios_c_semto++;
-                        else ios_c_semret++;
+                        if (wkr == KERN_OPERATION_TIMED_OUT)
+                        {
+                            ios_c_semto++;
+                        }
+                        else
+                        {
+                            /* The token was consumed (or the wait was interrupted).
+                             * Clear before scanning request fds: any later request
+                             * can enqueue one fresh wake, while requests that raced
+                             * before this clear are already visible to this scan. */
+                            __atomic_store_n( &ios_srv_wake_pending, 0, __ATOMIC_RELEASE );
+                            ios_c_semret++;
+                        }
                     }
                     else if (ios_srv_wake_sem && nosem)
                     {
                         static mach_timebase_info_data_t tb;
                         mach_timespec_t z = { 0, 0 };
                         unsigned long long dl;
-                        /* drain every queued signal, then sleep the full tick */
+                        /* A/B path deliberately ignores immediate wakes. Clear
+                         * the coalescing latch and drain the one possible token before
+                         * sleeping the full fallback tick. */
+                        __atomic_store_n( &ios_srv_wake_pending, 0, __ATOMIC_RELEASE );
                         while (semaphore_timedwait( ios_srv_wake_sem, z ) == KERN_SUCCESS)
                             ios_c_semret++;
                         if (!tb.denom) mach_timebase_info( &tb );

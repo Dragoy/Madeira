@@ -1,0 +1,61 @@
+name: Madeira LLVM iOS bootstrap
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/ios16-llvm-bootstrap.yml
+      - build/llvm-ios/**
+permissions:
+  contents: read
+concurrency:
+  group: madeira-llvm-ios16-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  llvm:
+    runs-on: macos-26
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Select Xcode and tools
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
+          command -v cmake >/dev/null || brew install cmake
+          command -v ninja >/dev/null || brew install ninja
+          xcodebuild -version
+      - name: Restore LLVM iOS
+        id: llvm-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            toolchains/llvm-project/llvm/include
+            toolchains/llvm-ios-build/include
+            toolchains/llvm-ios-build/lib
+          key: madeira-llvm15.0.7-ios16.5-xcode26.6-v2-${{ hashFiles('build/llvm-ios/build.sh') }}
+      - name: Compile LLVM for iOS 16.5
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        run: bash build/llvm-ios/build.sh
+      - name: Save verified LLVM iOS
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            toolchains/llvm-project/llvm/include
+            toolchains/llvm-ios-build/include
+            toolchains/llvm-ios-build/lib
+          key: madeira-llvm15.0.7-ios16.5-xcode26.6-v2-${{ hashFiles('build/llvm-ios/build.sh') }}
+      - name: Save build evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: madeira-llvm-ios-logs
+          path: |
+            ci-logs
+            toolchains/llvm-host-build/CMakeCache.txt
+            toolchains/llvm-host-build/CMakeFiles/CMakeConfigureLog.yaml
+            toolchains/llvm-ios-build/CMakeCache.txt
+            toolchains/llvm-ios-build/CMakeFiles/CMakeConfigureLog.yaml
+          if-no-files-found: ignore

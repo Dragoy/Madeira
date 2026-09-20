@@ -19,6 +19,10 @@ APP_LIB="$REPO_ROOT/app/Madeira/libwin32u_unix.a"
 
 mkdir -p "$OBJ_DIR"
 
+# Direct C compilation bypasses Wine's generated-header dependency rules.
+# Generate the declared set, including transitive COM/D3D headers, once.
+python3 "$REPO_ROOT/tools/ci/wine_headers.py" --root "$REPO_ROOT"
+
 SUCCEEDED=0
 FAILED=0
 FAILED_FILES=""
@@ -32,7 +36,7 @@ compile_one() {
     echo -n "  $name... "
 
     if xcrun -sdk iphoneos clang \
-        -arch arm64 -isysroot "$SDK" -miphoneos-version-min=17.0 \
+        -arch arm64 -isysroot "$SDK" -miphoneos-version-min=16.5 \
         -O2 -fPIC -fvisibility=hidden -fno-stack-protector -fno-strict-aliasing \
         -Wno-implicit-function-declaration -Wno-int-conversion \
         -include "$BUILD_DIR/config_ios.h" \
@@ -59,6 +63,7 @@ compile_one() {
         SUCCEEDED=$((SUCCEEDED + 1))
     else
         echo "FAILED"
+        cat "$OBJ_DIR/$name.err" || true
         FAILED=$((FAILED + 1))
         FAILED_FILES="$FAILED_FILES $name"
     fi
@@ -127,6 +132,11 @@ fi
 
 if [ $FAILED -gt 0 ]; then
     echo ""
+    echo "=== win32u compile diagnostics ==="
+    for name in $FAILED_FILES; do
+        echo "--- $name.err ---"
+        sed -n '1,120p' "$OBJ_DIR/$name.err" || true
+    done
     echo "(not linking — errors in $OBJ_DIR/<name>.err)"
     exit 1
 fi

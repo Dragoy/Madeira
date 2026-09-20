@@ -7637,6 +7637,31 @@ static inline int mprotect_exec( void *base, size_t size, int unix_prot )
             jit_pool_init_done = 1;
         }
 
+        /* iOS16/TrollStore diagnostic: runWineFullSequence() can be invoked more
+         * than once in one Madeira process. Swift may publish a freshly allocated
+         * WINE_IOS_JIT_* pool while this Wine unixlib keeps these function-static
+         * bases from the first session. Do not change behaviour here yet; simply
+         * name that split-brain state so a cold-vs-warm A/B can prove or kill the
+         * hypothesis. */
+        {
+            const char *cur_rx_s = getenv("WINE_IOS_JIT_RX");
+            const char *cur_rw_s = getenv("WINE_IOS_JIT_RW");
+            uintptr_t env_rx = cur_rx_s ? (uintptr_t)strtoull(cur_rx_s, NULL, 16) : 0;
+            uintptr_t env_rw = cur_rw_s ? (uintptr_t)strtoull(cur_rw_s, NULL, 16) : 0;
+            static int gen_mismatch_logged;
+            if (!gen_mismatch_logged &&
+                ((env_rx && env_rx != (uintptr_t)jit_rx_base) ||
+                 (env_rw && env_rw != (uintptr_t)jit_rw_base)))
+            {
+                gen_mismatch_logged = 1;
+                dprintf(STDERR_FILENO,
+                    "[pool-generation-mismatch] env RX=%p RW=%p but ntdll cached RX=%p RW=%p "
+                    "— multiple Wine runs in one Madeira process are using different JIT pools "
+                    "rev=ios16dx11diag1\n",
+                    (void *)env_rx, (void *)env_rw, jit_rx_base, jit_rw_base);
+            }
+        }
+
         /* iOS-Madeira ml640: AN OWNED ANON-JIT RANGE IS SETTLED — DECIDE IT FIRST.
          *
          * ROOT CAUSE, proven by the ml639 three-view hash:
@@ -13211,9 +13236,34 @@ void *ios_virtual_setup_exception_for_thread( void *stack_ptr, size_t size, EXCE
 
     if (!is_inside_thread_stack_teb( stack, &stack_info, teb ))
     {
-        /* routine in this port — FEX guest stacks are not Wine views */
-        if (!ios_range_writable( stack - size, size )) return NULL;
-        return stack - size;
+        /* iOS-Madeira ml763: "outside the native TEB stack" is only safe when
+         * this is the ARM64EC emulator stack that belongs to the SAME TEB.
+         *
+         * The old ml262/ml378 rule accepted ANY writable address. During a
+         * repeated guest AV, each KiUserExceptionDispatcher frame moved the
+         * host SP downward until it ran off the 256KB CHPE emulator stack and
+         * into unrelated process memory. Run #88 proved the consequence:
+         * frames marched from 0x1553b... to 0x1552b..., then SwiftUI crashed
+         * releasing a bogus object at 0x1552a8000. In a one-Mach-process port,
+         * "writable" is not ownership.
+         *
+         * Permit the frame only if the entire [stack-size, stack) range stays
+         * inside ChpeV2CpuAreaInfo's EmulatorStackLimit..EmulatorStackBase.
+         * The caller treats NULL as terminal for this guest thread. */
+        CHPE_V2_CPU_AREA_INFO *cpu = teb ? teb->ChpeV2CpuAreaInfo : NULL;
+        char *frame = stack - size;
+        uintptr_t lo = cpu ? (uintptr_t)cpu->EmulatorStackLimit : 0;
+        uintptr_t hi = cpu ? (uintptr_t)cpu->EmulatorStackBase : 0;
+
+        if (!cpu || !lo || !hi || (uintptr_t)stack > hi || (uintptr_t)frame < lo)
+        {
+            dprintf( 2, "[exc-stack] ml763 REFUSE outside owned stacks: teb=%p "
+                        "sp=%p frame=%p emu=[%p..%p) size=0x%lx\n",
+                     teb, stack, frame, (void *)lo, (void *)hi, (unsigned long)size );
+            return NULL;
+        }
+        if (!ios_range_writable( frame, size )) return NULL;
+        return frame;
     }
 
     stack -= size;

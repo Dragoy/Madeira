@@ -43,6 +43,65 @@ static os_log_t wine_proc_log(void) {
 
 #define LOG(fmt, ...) os_log(wine_proc_log(), "[WineProc] " fmt, ##__VA_ARGS__)
 
+/* On iOS Wine redirects stdout/stderr to Documents/madeira-log.txt before the
+ * interesting ARM64EC/FEX startup begins.  A guest abort therefore used to
+ * leave the unified device log with only "Madeira disappeared".  On a caught
+ * non-zero Wine exit, mirror a bounded tail back to os_log so one ordinary
+ * sysdiagnose/Console capture contains the root-cause lines too. */
+static void madeira_log_tail_to_oslog(const char *path, int max_lines)
+{
+    enum { MAX_BYTES = 48 * 1024, MAX_LINE = 900 };
+    int fd;
+    off_t end, start;
+    ssize_t n;
+    char *buf, *tail, *save, *line;
+
+    if (!path || max_lines <= 0) return;
+    if ((fd = open(path, O_RDONLY)) < 0) return;
+    end = lseek(fd, 0, SEEK_END);
+    if (end <= 0) { close(fd); return; }
+    start = end > MAX_BYTES ? end - MAX_BYTES : 0;
+    if (lseek(fd, start, SEEK_SET) < 0) { close(fd); return; }
+
+    buf = malloc((size_t)(end - start) + 1);
+    if (!buf) { close(fd); return; }
+    n = read(fd, buf, (size_t)(end - start));
+    close(fd);
+    if (n <= 0) { free(buf); return; }
+    buf[n] = 0;
+
+    /* If we started mid-file, discard the partial first line. */
+    tail = buf;
+    if (start)
+    {
+        char *nl = memchr(buf, '\n', (size_t)n);
+        if (nl) tail = nl + 1;
+    }
+
+    /* Keep only the requested number of complete trailing lines. */
+    {
+        int seen = 0;
+        char *q = buf + n;
+        while (q > tail)
+        {
+            --q;
+            if (*q == '\n' && ++seen > max_lines) { tail = q + 1; break; }
+        }
+    }
+
+    os_log_error(wine_proc_log(), "[WineTail] ---- last %{public}d lines after guest abort ----", max_lines);
+    save = NULL;
+    for (line = strtok_r(tail, "\n", &save); line; line = strtok_r(NULL, "\n", &save))
+    {
+        size_t len = strlen(line);
+        if (!len) continue;
+        if (len > MAX_LINE) line[MAX_LINE] = 0;
+        os_log_error(wine_proc_log(), "[WineTail] %{public}s", line);
+    }
+    os_log_error(wine_proc_log(), "[WineTail] ---- end ----");
+    free(buf);
+}
+
 /* ---- ml581: undo the hand-made AppData skeleton ------------------------
  *
  * While chasing the Steam login window I hand-created
@@ -524,23 +583,35 @@ static void *wine_process_thread(void *arg) {
         setenv("SteamGameId", "356400", 1);
         setenv("SteamAppId",  "356400", 1);
 
-        /* iOS-Madeira 2026-07-02: publish the TRUE JIT-pool RX->RW offset to
-         * xtajit64.dll (its own FEXCore copy reads this via getenv in
-         * ProcessInit). Set HERE — beside SteamAppPath, the point where
-         * Wine snapshots the environment — so it forwards reliably; setting
-         * it in FEXBridge.mm::jit_pool_init was too early and did not reach
-         * Wine's GetEnvironmentVariableW. jit_pool_init has already run by
-         * now (fex_initialize is a prerequisite for launching the guest),
-         * so the offset is available. */
+        /* Publish the production Wine JIT geometry before Wine snapshots the
+         * environment.  The 896MB pool is owned by StikJITHelper/ContentView,
+         * NOT by FEXBridge's standalone 64MB test pool.  Reading
+         * fex_get_jit_write_offset() here therefore returned zero under the
+         * TrollStore direct path and emitted a misleading warning.
+         *
+         * Current xtajit64 reads WINE_IOS_JIT_RW/RX directly in ProcessInit;
+         * keep MADEIRA_JIT_WRITE_OFFSET as a legacy mirror for older builds.
+         * The signed offset is allowed to be negative (on iPad14,5 run #80:
+         * RW 0x11cb00000 - RX 0x2a0000000 = -0x183500000). */
         {
-            int64_t jit_off = fex_get_jit_write_offset();
+            const char *rx_s = getenv("WINE_IOS_JIT_RX");
+            const char *rw_s = getenv("WINE_IOS_JIT_RW");
+            uint64_t rx = rx_s ? strtoull(rx_s, NULL, 16) : 0;
+            uint64_t rw = rw_s ? strtoull(rw_s, NULL, 16) : 0;
+            int64_t jit_off = (rx && rw) ? (int64_t)(rw - rx) : 0;
+
+            if (!jit_off)
+                jit_off = fex_get_jit_write_offset(); /* legacy/non-Wine test path only */
+
             if (jit_off != 0) {
                 char off_str[32];
                 snprintf(off_str, sizeof(off_str), "0x%llx", (unsigned long long)jit_off);
                 setenv("MADEIRA_JIT_WRITE_OFFSET", off_str, 1);
-                LOG("setenv MADEIRA_JIT_WRITE_OFFSET=%{public}s", off_str);
+                LOG("Wine JIT geometry: RX=%{public}s RW=%{public}s offset=%{public}lld (%{public}s)",
+                    rx_s ? rx_s : "<unset>", rw_s ? rw_s : "<unset>",
+                    (long long)jit_off, off_str);
             } else {
-                LOG("WARNING: fex_get_jit_write_offset() returned 0 — JIT pool not initialized?");
+                LOG("ERROR: production WINE_IOS_JIT_RX/RW missing before Wine launch");
             }
         }
 
@@ -916,7 +987,17 @@ static void *wine_process_thread(void *arg) {
             __wine_main(argc, argv);
             dprintf(STDERR_FILENO, "[WineProc] __wine_main returned normally\n");
         } else {
-            dprintf(STDERR_FILENO, "[WineProc] Wine exited with code %d (caught by longjmp)\n", wine_ios_exit_code);
+            int caught_code = wine_ios_exit_code;
+            dprintf(STDERR_FILENO, "[WineProc] Wine exited with code %d (caught by longjmp)\n", caught_code);
+            LOG("Wine guest exit intercepted: code=%{public}d", caught_code);
+            if (caught_code != 0) {
+                const char *docs = getenv("MADEIRA_DOCS_DIR");
+                char tail_path[PATH_MAX];
+                if (docs && snprintf(tail_path, sizeof(tail_path), "%s/madeira-log.txt", docs) < (int)sizeof(tail_path)) {
+                    fsync(STDERR_FILENO);
+                    madeira_log_tail_to_oslog(tail_path, 48);
+                }
+            }
         }
 
         g_wine_running = 0;

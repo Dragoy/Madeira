@@ -45,9 +45,18 @@ void *jit_region_write(JITRegion *region, size_t offset, const void *code, size_
 // Invalidate instruction cache for a range in the RX view.
 void jit_region_invalidate(JITRegion *region, size_t offset, size_t size);
 
-// Check if CS_DEBUGGED flag is set (JIT execution is allowed).
-// Returns true if the debugger has attached and set the flag.
+// Check if CS_DEBUGGED is sticky-set (JIT execution is allowed).
 bool jit_check_debugged(void);
+
+// Check whether a debugger is actively tracing the process (P_TRACED).
+// TrollStore's "Open with JIT" sets CS_DEBUGGED and then detaches, so this
+// is intentionally different from jit_check_debugged().
+bool jit_is_traced(void);
+
+// Create and retain a BRK-free dual-mapped JIT pool. This is the TrollStore
+// path: it relies on CS_DEBUGGED but does not require a live debugger protocol.
+// Returns true and fills RX/RW aliases on success.
+bool jit_direct_pool_create(size_t size, void **rx_out, void **rw_out);
 
 // Install SIGTRAP handler so BRK instructions don't crash the app
 // when no debugger is attached. Must be called before any jit26_* functions.

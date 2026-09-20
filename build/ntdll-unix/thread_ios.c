@@ -1733,7 +1733,30 @@ void abort_thread( int status )
  */
 void abort_process( int status )
 {
+#ifdef WINE_IOS
+    /* Every Windows "process" is a thread/pseudo-process inside the one
+     * Madeira Mach task.  Upstream's _exit() is therefore process-wide here:
+     * an ordinary guest fast-fail / abnormal ExitProcess tears down UIKit and
+     * makes SpringBoard report Madeira itself as a voluntary exit.
+     *
+     * Normal exit_process() already reaches process_exit_wrapper() -> exit(),
+     * which the forced wine_ios_exit.h shim converts to a longjmp/pthread exit.
+     * Keep the abnormal path consistent: never call the real POSIX _exit().
+     * The os_log beacon remains visible even after Wine redirects fd 1/2 to
+     * Documents/madeira-log.txt, so device logs name the guest status directly. */
+    int code = get_unix_exit_code( status );
+    TEB *teb = NtCurrentTeb();
+    unsigned long long tid = teb ? (unsigned long long)(ULONG_PTR)teb->ClientId.UniqueThread : 0;
+    os_log_error( OS_LOG_DEFAULT,
+                  "[Wine ntdll] abort_process intercepted: status=0x%{public}x unix=%{public}d tid=0x%{public}llx",
+                  (unsigned int)status, code, tid );
+    dprintf( STDERR_FILENO,
+             "[abort-process] iOS intercepted status=0x%08x unix=%d tid=%04llx -- NOT exiting Mach task\n",
+             (unsigned int)status, code, tid );
+    wine_ios_exit( code );
+#else
     _exit( get_unix_exit_code( status ));
+#endif
 }
 
 
