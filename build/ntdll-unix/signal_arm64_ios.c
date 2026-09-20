@@ -1164,6 +1164,14 @@ static int ios_mach_deliver_guest_exception( thread_t thread, arm_thread_state64
                                              int exception, uintptr_t fault_addr,
                                              uintptr_t thread_teb );
 
+/* ml765 helpers are defined with the Mach-delivery code below setup_exception,
+ * but the exception-server loop uses them earlier in this translation unit. */
+static int ios_alias_excl_recover_expected( uint64_t fault_pc, uint32_t stxr,
+                                            const arm_thread_state64_t *state,
+                                            uint64_t *expected_out );
+static int ios_alias_excl_cmpxchg( uintptr_t rw_addr, uint32_t size,
+                                   uint64_t expected, uint64_t desired );
+
 static void *ios_mach_exception_thread( void *arg )
 {
     mach_port_t port = (mach_port_t)(uintptr_t)arg;
