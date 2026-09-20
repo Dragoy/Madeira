@@ -2431,43 +2431,103 @@ static void *ios_mach_exception_thread( void *arg )
                                                    : state.__x[Rn];
                         uint64_t szmask = (Size == 3) ? ~0ULL : ((1ULL << (8u << Size)) - 1);
                         uint64_t stval = (Rt == 31) ? 0 : (state.__x[Rt] & szmask);
-                        uint64_t status = 1;   /* fail-by-default -> loop retries the LDAXR */
-                        int mi;
-                        for (mi = 0; mi < IOS_EXCL_MON_SLOTS; mi++)
-                            if (ios_excl_mon[mi].valid && ios_excl_mon[mi].thr == thread) break;
-                        if (mi < IOS_EXCL_MON_SLOTS && ios_excl_mon[mi].addr == addr
-                            && ios_excl_mon[mi].size == (uint8_t)Size)
+                        uint64_t status = 1;   /* fail-by-default -> loop retries LDAXR */
+                        int used_alias_rmw = 0;
+
+                        /* ml765: aligned STLXR to a JIT RX alias. The paired
+                         * LDAXR was readable and therefore never entered ml431's
+                         * software reservation table. For the proven compiler
+                         * RMW shape, reconstruct the loaded-old value and perform
+                         * one real atomic compare-exchange on the RW alias.
+                         *
+                         * Success => Rs=0 and fall through past cbnz.
+                         * Race/ABA-visible value mismatch => Rs=1; the existing
+                         * cbnz branches back to LDAXR and retries normally.
+                         * Unknown instruction shape is REFUSED and falls through
+                         * to honest guest exception delivery; no guessed atomic. */
+                        if (atomic_rw_alias)
                         {
-                            uint64_t cur = 0;
-                            mach_vm_size_t got = 0;
-                            ios_excl_mon[mi].valid = 0;
-                            uintptr_t write_addr = atomic_rw_alias ? atomic_rw_alias : (uintptr_t)addr;
-                            if (mach_vm_read_overwrite( mach_task_self(), addr, 1u << Size,
-                                                        (mach_vm_address_t)&cur, &got ) == KERN_SUCCESS
-                                && got == (1u << Size)
-                                && (cur & szmask) == (ios_excl_mon[mi].val & szmask)
-                                && mach_vm_write( mach_task_self(), write_addr,
-                                                  (vm_offset_t)(uintptr_t)&stval,
-                                                  1u << Size ) == KERN_SUCCESS)
-                                status = 0;
+                            uint64_t expected = 0;
+                            if (ios_alias_excl_recover_expected( fault_pc, insn, &state, &expected ))
+                            {
+                                status = ios_alias_excl_cmpxchg( atomic_rw_alias, Size,
+                                                                 expected, stval ) ? 0 : 1;
+                                used_alias_rmw = 1;
+                                if (Rs != 31) state.__x[Rs] = status;
+                                __darwin_arm_thread_state64_set_pc_fptr(
+                                    state, (void *)(uintptr_t)(fault_pc + 4));
+                                {
+                                    static volatile int ar_count;
+                                    int n = __sync_add_and_fetch(&ar_count, 1);
+                                    if (n <= 16 || (n % 256) == 0)
+                                        dprintf(STDERR_FILENO,
+                                                "[alias-excl] ml765 #%d STLXR-RMW pc=0x%llx rx=0x%llx "
+                                                "rw=0x%llx size=%u expected=0x%llx desired=0x%llx status=%llu\n",
+                                                n, (unsigned long long)fault_pc,
+                                                (unsigned long long)addr,
+                                                (unsigned long long)atomic_rw_alias,
+                                                1u << Size,
+                                                (unsigned long long)expected,
+                                                (unsigned long long)stval,
+                                                (unsigned long long)status);
+                                }
+                                handled = 1;
+                            }
+                            else
+                            {
+                                static int refuse_n;
+                                if (refuse_n < 8)
+                                    dprintf(STDERR_FILENO,
+                                            "[alias-excl] ml765 REFUSE unknown STLXR sequence "
+                                            "pc=0x%llx insn=0x%08x rx=0x%llx rw=0x%llx\n",
+                                            (unsigned long long)fault_pc, insn,
+                                            (unsigned long long)addr,
+                                            (unsigned long long)atomic_rw_alias);
+                            }
                         }
-                        else if (mi < IOS_EXCL_MON_SLOTS)
-                            ios_excl_mon[mi].valid = 0;
-                        if (Rs != 31) state.__x[Rs] = status;
-                        __darwin_arm_thread_state64_set_pc_fptr(
-                            state, (void *)(uintptr_t)(fault_pc + 4));
-                        static volatile int sx_count;
-                        int n = __sync_add_and_fetch(&sx_count, 1);
-                        if (n <= 8 || (n % 256) == 0)
-                            dprintf(STDERR_FILENO,
-                                    "[mach_exc] EXCL rev=ml764 #%d STLXR pc=0x%llx addr=0x%llx "
-                                    "rw=0x%llx size=%u status=%llu%s\n",
-                                    n, (unsigned long long)fault_pc,
-                                    (unsigned long long)addr,
-                                    (unsigned long long)(atomic_rw_alias ? atomic_rw_alias : (uintptr_t)addr),
-                                    1u << Size, (unsigned long long)status,
-                                    atomic_rw_alias ? " (JIT alias)" : "");
-                        handled = 1;
+
+                        if (!used_alias_rmw && !atomic_rw_alias)
+                        {
+                            /* Legacy ml431 path for genuinely unaligned
+                             * LDAXR/STLXR where BOTH instructions fault and the
+                             * software monitor was populated by the LDAXR arm. */
+                            int mi;
+                            for (mi = 0; mi < IOS_EXCL_MON_SLOTS; mi++)
+                                if (ios_excl_mon[mi].valid && ios_excl_mon[mi].thr == thread) break;
+                            if (mi < IOS_EXCL_MON_SLOTS && ios_excl_mon[mi].addr == addr
+                                && ios_excl_mon[mi].size == (uint8_t)Size)
+                            {
+                                uint64_t cur = 0;
+                                mach_vm_size_t got = 0;
+                                ios_excl_mon[mi].valid = 0;
+                                if (mach_vm_read_overwrite( mach_task_self(), addr, 1u << Size,
+                                                            (mach_vm_address_t)&cur, &got ) == KERN_SUCCESS
+                                    && got == (1u << Size)
+                                    && (cur & szmask) == (ios_excl_mon[mi].val & szmask)
+                                    && mach_vm_write( mach_task_self(), addr,
+                                                      (vm_offset_t)(uintptr_t)&stval,
+                                                      1u << Size ) == KERN_SUCCESS)
+                                    status = 0;
+                            }
+                            else if (mi < IOS_EXCL_MON_SLOTS)
+                                ios_excl_mon[mi].valid = 0;
+
+                            if (Rs != 31) state.__x[Rs] = status;
+                            __darwin_arm_thread_state64_set_pc_fptr(
+                                state, (void *)(uintptr_t)(fault_pc + 4));
+                            {
+                                static volatile int sx_count;
+                                int n = __sync_add_and_fetch(&sx_count, 1);
+                                if (n <= 8 || (n % 256) == 0)
+                                    dprintf(STDERR_FILENO,
+                                            "[mach_exc] UNALIGNED-EXCL rev=ml431 #%d STLXR pc=0x%llx "
+                                            "addr=0x%llx size=%u status=%llu\n",
+                                            n, (unsigned long long)fault_pc,
+                                            (unsigned long long)addr, 1u << Size,
+                                            (unsigned long long)status);
+                            }
+                            handled = 1;
+                        }
                     }
                     else if ((insn & 0x3FA07C00u) == 0x08A07C00u)    /* CAS/CASA/CASL/CASAL */
                     {
@@ -6165,9 +6225,105 @@ static int ios_mach_redirect_guest_abort( arm_thread_state64_t *state, TEB *teb,
 
     state->__x[0] = 1;
     state->__x[18] = (uint64_t)(uintptr_t)teb;
-    __darwin_arm_thread_state64_set_sp( state, safe_sp );
-    __darwin_arm_thread_state64_set_pc_fptr( state, (void *)abort_thread );
+    __darwin_arm_thread_state64_set_sp( *state, safe_sp );
+    __darwin_arm_thread_state64_set_pc_fptr( *state, (void *)abort_thread );
     return 1;
+}
+
+/* ml765: recover the pre-LDAXR value for the compiler-generated
+ * read/modify/write loop that can fault only on STLXR when its target is the
+ * read-only RX view of our JIT pool.
+ *
+ * Proven run-#88 ntdll sequence at PE RVA 0x5e6b4:
+ *   ldaxr w9,[x8]
+ *   add   w9,w9,#1
+ *   stlxr w10,w9,[x8]    <-- permission fault on pool RX
+ *   cbnz  w10,retry
+ *
+ * LDAXR itself succeeds because RX is readable, so ml431's software monitor
+ * never sees it. Decode those two immediately preceding instructions and invert
+ * the ADD/SUB to reconstruct the loaded value. Deliberately reject every other
+ * shape rather than inventing reservation semantics. */
+static int ios_alias_excl_recover_expected( uint64_t fault_pc, uint32_t stxr,
+                                            const arm_thread_state64_t *state,
+                                            uint64_t *expected_out )
+{
+    uint32_t seq[2] = {0, 0};
+    mach_vm_size_t got = 0;
+    uint32_t size = (stxr >> 30) & 3;
+    uint32_t st_rn = (stxr >> 5) & 31;
+    uint32_t st_rt = stxr & 31;
+    uint64_t mask = size == 3 ? ~0ULL : ((1ULL << (8u << size)) - 1);
+    uint32_t ldxr, alu, ld_rn, ld_rt, alu_rn, alu_rd;
+    uint64_t desired, imm, expected;
+    int is_sub;
+
+    if (fault_pc < 8 ||
+        mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)(fault_pc - 8),
+                                sizeof(seq), (mach_vm_address_t)seq, &got ) != KERN_SUCCESS ||
+        got != sizeof(seq))
+        return 0;
+
+    ldxr = seq[0];
+    alu  = seq[1];
+
+    /* Exact single-register LDAXR/LDXR family, same width/base/value register. */
+    if (!((ldxr & 0x3ffffc00u) == 0x085ffc00u ||
+          (ldxr & 0x3ffffc00u) == 0x085f7c00u))
+        return 0;
+    if (((ldxr >> 30) & 3) != size) return 0;
+    ld_rn = (ldxr >> 5) & 31;
+    ld_rt = ldxr & 31;
+    if (ld_rn != st_rn || ld_rt != st_rt || st_rt == 31) return 0;
+
+    /* ADD/SUB (immediate), optionally setting flags. Fixed bits[28:24]=10001.
+     * Require in-place RMW of the loaded register. */
+    if ((alu & 0x1f000000u) != 0x11000000u) return 0;
+    if (((alu >> 31) & 1) != (size == 3)) return 0;
+    alu_rn = (alu >> 5) & 31;
+    alu_rd = alu & 31;
+    if (alu_rn != st_rt || alu_rd != st_rt) return 0;
+
+    imm = (alu >> 10) & 0xfff;
+    if (alu & (1u << 22)) imm <<= 12;
+    is_sub = (alu >> 30) & 1;
+
+    desired = state->__x[st_rt] & mask;
+    expected = is_sub ? (desired + imm) : (desired - imm);
+    *expected_out = expected & mask;
+    return 1;
+}
+
+static int ios_alias_excl_cmpxchg( uintptr_t rw_addr, uint32_t size,
+                                   uint64_t expected, uint64_t desired )
+{
+    switch (size)
+    {
+    case 0:
+    {
+        uint8_t e = (uint8_t)expected;
+        return __atomic_compare_exchange_n( (uint8_t *)rw_addr, &e, (uint8_t)desired,
+                                            0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST );
+    }
+    case 1:
+    {
+        uint16_t e = (uint16_t)expected;
+        return __atomic_compare_exchange_n( (uint16_t *)rw_addr, &e, (uint16_t)desired,
+                                            0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST );
+    }
+    case 2:
+    {
+        uint32_t e = (uint32_t)expected;
+        return __atomic_compare_exchange_n( (uint32_t *)rw_addr, &e, (uint32_t)desired,
+                                            0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST );
+    }
+    default:
+    {
+        uint64_t e = expected;
+        return __atomic_compare_exchange_n( (uint64_t *)rw_addr, &e, desired,
+                                            0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST );
+    }
+    }
 }
 
 static int ios_mach_deliver_guest_exception_inner( thread_t thread, arm_thread_state64_t *state,
