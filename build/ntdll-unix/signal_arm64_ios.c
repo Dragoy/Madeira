@@ -2172,6 +2172,7 @@ static void *ios_mach_exception_thread( void *arg )
                 extern void *ios_jit_rx_base_global;
                 extern void *ios_jit_rw_base_global;
                 extern size_t ios_jit_pool_size_global;
+                extern uintptr_t ios_jit_anon_alias_lookup(uintptr_t fault_addr);
                 uintptr_t rx = (uintptr_t)ios_jit_rx_base_global;
                 uintptr_t rw = (uintptr_t)ios_jit_rw_base_global;
                 size_t sz = ios_jit_pool_size_global;
@@ -2210,6 +2211,14 @@ static void *ios_mach_exception_thread( void *arg )
 
                     int patched = 0;
                     int adjust_pc = 0;
+                    uintptr_t atomic_rw_alias = 0;
+                    {
+                        uintptr_t fa = (uintptr_t)fault_addr;
+                        if (fa >= rx && fa < rx + sz)
+                            atomic_rw_alias = rw + (fa - rx);
+                        else
+                            atomic_rw_alias = ios_jit_anon_alias_lookup( fa );
+                    }
 
                     /* iOS-Madeira: gate the LDAR/STLR rewrite on the access
                      * being ACTUALLY unaligned for its size. The Mach
@@ -2254,19 +2263,39 @@ static void *ios_mach_exception_thread( void *arg )
                          * that store correctly through the RW alias and advances the PC.
                          * Skip, and let it. 16/32/64-bit recovery is unchanged. */
                         if (!align_mask || ((uint64_t)fault_addr & align_mask) == 0) {
-                            if (!align_mask) {
-                                static int ios_byte_skip_count = 0;
-                                if (ios_byte_skip_count < 16) {
-                                    ios_byte_skip_count++;
-                                    fprintf(stderr, "[unalign-byte] ml624 #%d SKIP backpatch: byte access cannot be "
-                                                    "unaligned; insn=%08x pc=%p addr=%p -> alias emulator "
-                                                    "(pc-4 preserved)\n",
-                                            ios_byte_skip_count, insn, (void *)fault_pc, fault_addr);
+                            int alias_exclusive_store =
+                                atomic_rw_alias &&
+                                (((insn & 0x3FE0FC00u) == 0x0800FC00u) ||  /* STLXR* */
+                                 ((insn & 0x3FE0FC00u) == 0x08007C00u) ||  /* STXR*  */
+                                 ((insn & 0x3FA07C00u) == 0x08A07C00u));   /* CAS*   */
+
+                            if (alias_exclusive_store) {
+                                /* ml764: aligned LL/SC/LSE stores can fault because
+                                 * the target is the RX view of the dual-mapped JIT
+                                 * pool.  Route only the write through the RW alias;
+                                 * reads stay on the canonical RX address. */
+                                static int alias_excl_gate_n;
+                                if (alias_excl_gate_n < 16)
+                                    dprintf(STDERR_FILENO,
+                                            "[alias-excl] ml764 #%d aligned atomic permission fault "
+                                            "pc=0x%llx insn=0x%08x rx=0x%llx rw=0x%llx -> exclusive emulator\n",
+                                            ++alias_excl_gate_n,
+                                            (unsigned long long)fault_pc, insn,
+                                            (unsigned long long)fault_addr,
+                                            (unsigned long long)atomic_rw_alias);
+                            } else {
+                                if (!align_mask) {
+                                    static int ios_byte_skip_count = 0;
+                                    if (ios_byte_skip_count < 16) {
+                                        ios_byte_skip_count++;
+                                        fprintf(stderr, "[unalign-byte] ml624 #%d SKIP backpatch: byte access cannot be "
+                                                        "unaligned; insn=%08x pc=%p addr=%p -> alias emulator "
+                                                        "(pc-4 preserved)\n",
+                                                ios_byte_skip_count, insn, (void *)fault_pc, fault_addr);
+                                    }
                                 }
+                                goto skip_unaligned_backpatch;
                             }
-                            /* Aligned — this is a genuine SEGV/BUS, not an
-                             * unaligned-atomic-needs-backpatch case. Skip. */
-                            goto skip_unaligned_backpatch;
                         }
                     }
 
@@ -2412,11 +2441,12 @@ static void *ios_mach_exception_thread( void *arg )
                             uint64_t cur = 0;
                             mach_vm_size_t got = 0;
                             ios_excl_mon[mi].valid = 0;
+                            uintptr_t write_addr = atomic_rw_alias ? atomic_rw_alias : (uintptr_t)addr;
                             if (mach_vm_read_overwrite( mach_task_self(), addr, 1u << Size,
                                                         (mach_vm_address_t)&cur, &got ) == KERN_SUCCESS
                                 && got == (1u << Size)
                                 && (cur & szmask) == (ios_excl_mon[mi].val & szmask)
-                                && mach_vm_write( mach_task_self(), addr,
+                                && mach_vm_write( mach_task_self(), write_addr,
                                                   (vm_offset_t)(uintptr_t)&stval,
                                                   1u << Size ) == KERN_SUCCESS)
                                 status = 0;
@@ -2430,11 +2460,13 @@ static void *ios_mach_exception_thread( void *arg )
                         int n = __sync_add_and_fetch(&sx_count, 1);
                         if (n <= 8 || (n % 256) == 0)
                             dprintf(STDERR_FILENO,
-                                    "[mach_exc] UNALIGNED-EXCL rev=ml431 #%d STLXR pc=0x%llx addr=0x%llx "
-                                    "size=%u status=%llu\n",
+                                    "[mach_exc] EXCL rev=ml764 #%d STLXR pc=0x%llx addr=0x%llx "
+                                    "rw=0x%llx size=%u status=%llu%s\n",
                                     n, (unsigned long long)fault_pc,
-                                    (unsigned long long)addr, 1u << Size,
-                                    (unsigned long long)status);
+                                    (unsigned long long)addr,
+                                    (unsigned long long)(atomic_rw_alias ? atomic_rw_alias : (uintptr_t)addr),
+                                    1u << Size, (unsigned long long)status,
+                                    atomic_rw_alias ? " (JIT alias)" : "");
                         handled = 1;
                     }
                     else if ((insn & 0x3FA07C00u) == 0x08A07C00u)    /* CAS/CASA/CASL/CASAL */
@@ -2455,8 +2487,9 @@ static void *ios_mach_exception_thread( void *arg )
                             && got == (1u << Size))
                         {
                             int stored = 0;
+                            uintptr_t write_addr = atomic_rw_alias ? atomic_rw_alias : (uintptr_t)addr;
                             if ((cur & szmask) == cmp)
-                                stored = (mach_vm_write( mach_task_self(), addr,
+                                stored = (mach_vm_write( mach_task_self(), write_addr,
                                                          (vm_offset_t)(uintptr_t)&stval,
                                                          1u << Size ) == KERN_SUCCESS);
                             if ((cur & szmask) == cmp && !stored)
@@ -2468,11 +2501,13 @@ static void *ios_mach_exception_thread( void *arg )
                             int n = __sync_add_and_fetch(&cas_count, 1);
                             if (n <= 8 || (n % 256) == 0)
                                 dprintf(STDERR_FILENO,
-                                        "[mach_exc] UNALIGNED-EXCL rev=ml431 #%d CAS pc=0x%llx addr=0x%llx "
-                                        "size=%u old=0x%llx swapped=%d\n",
+                                        "[mach_exc] EXCL rev=ml764 #%d CAS pc=0x%llx addr=0x%llx "
+                                        "rw=0x%llx size=%u old=0x%llx swapped=%d%s\n",
                                         n, (unsigned long long)fault_pc,
-                                        (unsigned long long)addr, 1u << Size,
-                                        (unsigned long long)cur, (cur & szmask) == cmp);
+                                        (unsigned long long)addr,
+                                        (unsigned long long)(atomic_rw_alias ? atomic_rw_alias : (uintptr_t)addr),
+                                        1u << Size, (unsigned long long)cur, (cur & szmask) == cmp,
+                                        atomic_rw_alias ? " (JIT alias)" : "");
                             handled = 1;
                         }
                     }
