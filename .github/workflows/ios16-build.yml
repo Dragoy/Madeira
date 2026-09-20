@@ -305,6 +305,8 @@ jobs:
         run: python3 tools/ci/test_ios_process_exit.py
       - name: Verify Mach exception stack ownership
         run: python3 tools/ci/test_ios_mach_stack_ownership.py
+      - name: Verify JIT alias exclusive atomics
+        run: python3 tools/ci/test_ios_exclusive_alias.py
       - name: Restore ntdll iOS cache
         id: cache-ntdll
         uses: actions/cache/restore@v4
